@@ -56,6 +56,15 @@ enum AppScreen
 };
 
 
+enum ConfirmAction
+{
+    CONFIRM_NONE,
+    CONFIRM_NEW_PUZZLE,
+    CONFIRM_SETTINGS,
+    CONFIRM_EXIT
+};
+
+
 // ============================================================
 // CATEGORY TYPES
 // ============================================================
@@ -364,6 +373,8 @@ struct GameState
     Category rows[3];
     Category columns[3];
 
+    UnlimitedSettings activeSettings;
+
     int gridPokemon[3][3];
 
     int selectedRow;
@@ -378,6 +389,7 @@ struct GameState
 
     bool gameWon;
     bool gameLost;
+    bool resultOverlayDismissed;
     bool lastAnswerWrong;
 
     Uint32 gameStartTicks;
@@ -402,7 +414,8 @@ enum TouchContext
     TOUCH_SETTINGS,
     TOUCH_BOARD,
     TOUCH_SELECTOR,
-    TOUCH_RESULT
+    TOUCH_RESULT,
+    TOUCH_CONFIRM
 };
 
 
@@ -4282,6 +4295,7 @@ void resetGameState(
 
     game.gameWon = false;
     game.gameLost = false;
+    game.resultOverlayDismissed = false;
 
     game.lastAnswerWrong = false;
 
@@ -4300,15 +4314,36 @@ void resetGameState(
 }
 
 
+bool gameNeedsConfirmation(
+    const GameState& game
+)
+{
+    return
+        !game.gameWon
+        &&
+        !game.gameLost
+        &&
+        (
+            game.correctAnswers > 0
+            ||
+            game.mistakes > 0
+        );
+}
+
+
 bool startNewPuzzle(
     GameState& game,
     const UnlimitedSettings& settings
 )
 {
+    Category newRows[3];
+    Category newColumns[3];
+
+
     if (
         !generateBoard(
-            game.rows,
-            game.columns,
+            newRows,
+            newColumns,
             settings
         )
     )
@@ -4317,9 +4352,27 @@ bool startNewPuzzle(
     }
 
 
+    for (
+        int i = 0;
+        i < 3;
+        i++
+    )
+    {
+        game.rows[i] =
+            newRows[i];
+
+        game.columns[i] =
+            newColumns[i];
+    }
+
+
     resetGameState(
         game
     );
+
+
+    game.activeSettings =
+        settings;
 
 
     return true;
@@ -4574,6 +4627,14 @@ bool resultOverlayVisible(
     const GameState& game
 )
 {
+    if (
+        game.resultOverlayDismissed
+    )
+    {
+        return false;
+    }
+
+
     if (
         game.gameLost
     )
@@ -4999,6 +5060,14 @@ int main(
         true;
 
 
+    bool settingsOpenedFromGame =
+        false;
+
+
+    ConfirmAction confirmAction =
+        CONFIRM_NONE;
+
+
     SettingsFocus settingsFocus =
         SETTINGS_OPTIONS;
 
@@ -5295,6 +5364,18 @@ int main(
 
             if (
                 screen ==
+                    SCREEN_GAME
+                &&
+                confirmAction !=
+                    CONFIRM_NONE
+            )
+            {
+                touch.context =
+                    TOUCH_CONFIRM;
+            }
+
+            else if (
+                screen ==
                 SCREEN_MAIN_MENU
             )
             {
@@ -5380,14 +5461,35 @@ int main(
         // ====================================================
 
         if (
-            buttonsDown &
-            HidNpadButton_Plus
+            (
+                buttonsDown &
+                HidNpadButton_Plus
+            )
+            &&
+            confirmAction ==
+                CONFIRM_NONE
         )
         {
-            running =
-                false;
+            if (
+                screen ==
+                    SCREEN_GAME
+                &&
+                gameNeedsConfirmation(
+                    game
+                )
+            )
+            {
+                confirmAction =
+                    CONFIRM_EXIT;
+            }
 
-            continue;
+            else
+            {
+                running =
+                    false;
+
+                continue;
+            }
         }
 
 
@@ -5484,10 +5586,159 @@ int main(
 
 
         // ====================================================
-        // MAIN MENU INPUT
+        // CONFIRMATION INPUT
         // ====================================================
 
         if (
+            screen ==
+                SCREEN_GAME
+            &&
+            confirmAction !=
+                CONFIRM_NONE
+        )
+        {
+            SDL_Rect confirmButton =
+            {
+                455,
+                454,
+                175,
+                52
+            };
+
+
+            SDL_Rect cancelButton =
+            {
+                650,
+                454,
+                175,
+                52
+            };
+
+
+            bool touchConfirm =
+                touchReleased
+                &&
+                touch.context ==
+                    TOUCH_CONFIRM
+                &&
+                !touch.moved
+                &&
+                pointInside(
+                    touch.lastX,
+                    touch.lastY,
+                    confirmButton
+                );
+
+
+            bool touchCancel =
+                touchReleased
+                &&
+                touch.context ==
+                    TOUCH_CONFIRM
+                &&
+                !touch.moved
+                &&
+                pointInside(
+                    touch.lastX,
+                    touch.lastY,
+                    cancelButton
+                );
+
+
+            if (
+                (
+                    buttonsDown &
+                    HidNpadButton_B
+                )
+                ||
+                touchCancel
+            )
+            {
+                confirmAction =
+                    CONFIRM_NONE;
+            }
+
+            else if (
+                (
+                    buttonsDown &
+                    HidNpadButton_A
+                )
+                ||
+                touchConfirm
+            )
+            {
+                ConfirmAction acceptedAction =
+                    confirmAction;
+
+
+                confirmAction =
+                    CONFIRM_NONE;
+
+
+                if (
+                    acceptedAction ==
+                        CONFIRM_NEW_PUZZLE
+                )
+                {
+                    startNewPuzzle(
+                        game,
+                        settings
+                    );
+                }
+
+                else if (
+                    acceptedAction ==
+                        CONFIRM_SETTINGS
+                )
+                {
+                    game.selectorOpen =
+                        false;
+
+
+                    clearPokemonSearch();
+
+
+                    screen =
+                        SCREEN_UNLIMITED_SETTINGS;
+
+
+                    settingsOpenedFromGame =
+                        true;
+
+
+                    settingsFocus =
+                        SETTINGS_OPTIONS;
+
+
+                    selectedOption =
+                        0;
+
+
+                    settingsError =
+                        false;
+
+
+                    menuStickReady =
+                        false;
+                }
+
+                else if (
+                    acceptedAction ==
+                        CONFIRM_EXIT
+                )
+                {
+                    running =
+                        false;
+                }
+            }
+        }
+
+
+        // ====================================================
+        // MAIN MENU INPUT
+        // ====================================================
+
+        else if (
             screen ==
             SCREEN_MAIN_MENU
         )
@@ -5527,6 +5778,10 @@ int main(
             {
                 screen =
                     SCREEN_UNLIMITED_SETTINGS;
+
+
+                settingsOpenedFromGame =
+                    false;
 
 
                 settingsFocus =
@@ -5662,15 +5917,34 @@ int main(
                 HidNpadButton_B
             )
             {
-                screen =
-                    SCREEN_MAIN_MENU;
+                if (
+                    settingsOpenedFromGame
+                )
+                {
+                    screen =
+                        SCREEN_GAME;
+
+
+                    settingsOpenedFromGame =
+                        false;
+
+
+                    game.boardStickReady =
+                        false;
+                }
+
+                else
+                {
+                    screen =
+                        SCREEN_MAIN_MENU;
+
+
+                    menuStickReady =
+                        false;
+                }
 
 
                 settingsError =
-                    false;
-
-
-                menuStickReady =
                     false;
             }
 
@@ -6396,6 +6670,10 @@ int main(
 
                         screen =
                             SCREEN_GAME;
+
+
+                        settingsOpenedFromGame =
+                            false;
                     }
                 }
             }
@@ -6411,6 +6689,22 @@ int main(
             SCREEN_GAME
         )
         {
+            if (
+                resultOverlayVisible(
+                    game
+                )
+                &&
+                (
+                    buttonsDown &
+                    HidNpadButton_B
+                )
+            )
+            {
+                game.resultOverlayDismissed =
+                    true;
+            }
+
+
             SDL_Rect selectorListArea =
             {
                 300,
@@ -6475,28 +6769,48 @@ int main(
                 HidNpadButton_Y
             )
             {
-                game.selectorOpen =
-                    false;
+                if (
+                    gameNeedsConfirmation(
+                        game
+                    )
+                )
+                {
+                    confirmAction =
+                        CONFIRM_SETTINGS;
+                }
+
+                else
+                {
+                    game.selectorOpen =
+                        false;
 
 
-                screen =
-                    SCREEN_UNLIMITED_SETTINGS;
+                    clearPokemonSearch();
 
 
-                settingsFocus =
-                    SETTINGS_OPTIONS;
+                    screen =
+                        SCREEN_UNLIMITED_SETTINGS;
 
 
-                selectedOption =
-                    0;
+                    settingsOpenedFromGame =
+                        true;
 
 
-                settingsError =
-                    false;
+                    settingsFocus =
+                        SETTINGS_OPTIONS;
 
 
-                menuStickReady =
-                    false;
+                    selectedOption =
+                        0;
+
+
+                    settingsError =
+                        false;
+
+
+                    menuStickReady =
+                        false;
+                }
             }
 
             else if (
@@ -6504,15 +6818,32 @@ int main(
                 HidNpadButton_X
             )
             {
-                startNewPuzzle(
-                    game,
-                    settings
-                );
+                if (
+                    gameNeedsConfirmation(
+                        game
+                    )
+                )
+                {
+                    confirmAction =
+                        CONFIRM_NEW_PUZZLE;
+                }
+
+                else
+                {
+                    startNewPuzzle(
+                        game,
+                        settings
+                    );
+                }
             }
 
 
             if (
-                !game.gameWon &&
+                confirmAction ==
+                    CONFIRM_NONE
+                &&
+                !game.gameWon
+                &&
                 !game.gameLost
             )
             {
@@ -6837,10 +7168,23 @@ int main(
                             )
                         )
                         {
-                            startNewPuzzle(
-                                game,
-                                settings
-                            );
+                            if (
+                                gameNeedsConfirmation(
+                                    game
+                                )
+                            )
+                            {
+                                confirmAction =
+                                    CONFIRM_NEW_PUZZLE;
+                            }
+
+                            else
+                            {
+                                startNewPuzzle(
+                                    game,
+                                    settings
+                                );
+                            }
                         }
 
 
@@ -6861,20 +7205,37 @@ int main(
                             )
                         )
                         {
-                            screen =
-                                SCREEN_UNLIMITED_SETTINGS;
+                            if (
+                                gameNeedsConfirmation(
+                                    game
+                                )
+                            )
+                            {
+                                confirmAction =
+                                    CONFIRM_SETTINGS;
+                            }
+
+                            else
+                            {
+                                screen =
+                                    SCREEN_UNLIMITED_SETTINGS;
 
 
-                            settingsFocus =
-                                SETTINGS_OPTIONS;
+                                settingsOpenedFromGame =
+                                    true;
 
 
-                            selectedOption =
-                                0;
+                                settingsFocus =
+                                    SETTINGS_OPTIONS;
 
 
-                            settingsError =
-                                false;
+                                selectedOption =
+                                    0;
+
+
+                                settingsError =
+                                    false;
+                            }
                         }
                     }
                 }
@@ -7143,7 +7504,7 @@ int main(
                                 AttemptResult result =
                                     attemptPokemon(
                                         game,
-                                        settings,
+                                        game.activeSettings,
                                         game.selectedPokemon
                                     );
 
@@ -7298,7 +7659,7 @@ int main(
                                             AttemptResult result =
                                                 attemptPokemon(
                                                     game,
-                                                    settings,
+                                                    game.activeSettings,
                                                     pokemonIndex
                                                 );
 
@@ -7336,7 +7697,7 @@ int main(
                 SDL_Rect newPuzzleButton =
                 {
                     405,
-                    430,
+                    405,
                     205,
                     55
                 };
@@ -7345,7 +7706,7 @@ int main(
                 SDL_Rect settingsButton =
                 {
                     670,
-                    430,
+                    405,
                     205,
                     55
                 };
@@ -7375,6 +7736,10 @@ int main(
                 {
                     screen =
                         SCREEN_UNLIMITED_SETTINGS;
+
+
+                    settingsOpenedFromGame =
+                        true;
 
 
                     settingsFocus =
@@ -8387,7 +8752,7 @@ int main(
                 24,
                 100,
                 225,
-                settings.enableTimer
+                game.activeSettings.enableTimer
                     ? 128
                     : 100
             };
@@ -8406,7 +8771,7 @@ int main(
 
 
             if (
-                settings.unlimitedPP
+                game.activeSettings.unlimitedPP
             )
             {
                 std::snprintf(
@@ -8473,7 +8838,7 @@ int main(
 
 
             if (
-                settings.enableTimer
+                game.activeSettings.enableTimer
             )
             {
                 Uint32 endTicks =
@@ -8769,7 +9134,22 @@ int main(
                     )
                     {
                         const int gridSpriteSize =
-                            112;
+                            124;
+
+
+                        const int spriteAreaTop =
+                            cell.y + 6;
+
+
+                        const int spriteAreaBottom =
+                            cell.y +
+                            cell.h -
+                            35;
+
+
+                        const int spriteAreaHeight =
+                            spriteAreaBottom -
+                            spriteAreaTop;
 
 
                         drawPokemonSprite(
@@ -8782,7 +9162,11 @@ int main(
                                 gridSpriteSize
                             ) / 2,
 
-                            cell.y + 1,
+                            spriteAreaTop +
+                            (
+                                spriteAreaHeight -
+                                gridSpriteSize
+                            ) / 2,
 
                             gridSpriteSize
                         );
@@ -9564,9 +9948,9 @@ int main(
                 SDL_Rect resultPanel =
                 {
                     340,
-                    190,
+                    165,
                     600,
-                    330
+                    390
                 };
 
 
@@ -9582,7 +9966,7 @@ int main(
                 SDL_Rect resultTitle =
                 {
                     resultPanel.x,
-                    resultPanel.y + 35,
+                    resultPanel.y + 28,
                     resultPanel.w,
                     60
                 };
@@ -9623,7 +10007,7 @@ int main(
                 SDL_Rect resultInfo =
                 {
                     resultPanel.x,
-                    resultPanel.y + 120,
+                    resultPanel.y + 112,
                     resultPanel.w,
                     40
                 };
@@ -9639,7 +10023,7 @@ int main(
 
 
                 if (
-                    settings.enableTimer
+                    game.activeSettings.enableTimer
                 )
                 {
                     char timer[32];
@@ -9668,7 +10052,7 @@ int main(
                     SDL_Rect timerArea =
                     {
                         resultPanel.x,
-                        resultPanel.y + 165,
+                        resultPanel.y + 157,
                         resultPanel.w,
                         35
                     };
@@ -9687,7 +10071,7 @@ int main(
                 SDL_Rect newPuzzleButton =
                 {
                     405,
-                    430,
+                    405,
                     205,
                     55
                 };
@@ -9696,7 +10080,7 @@ int main(
                 SDL_Rect settingsButton =
                 {
                     670,
-                    430,
+                    405,
                     205,
                     55
                 };
@@ -9742,7 +10126,268 @@ int main(
                     settingsButton,
                     white
                 );
+
+
+                SDL_Rect viewGridButton =
+                {
+                    455,
+                    478,
+                    370,
+                    48
+                };
+
+
+                setColor(
+                    renderer,
+                    panelBright
+                );
+
+
+                SDL_RenderFillRect(
+                    renderer,
+                    &viewGridButton
+                );
+
+
+                setColor(
+                    renderer,
+                    border
+                );
+
+
+                SDL_RenderDrawRect(
+                    renderer,
+                    &viewGridButton
+                );
+
+
+                drawTextCentered(
+                    renderer,
+                    smallFont,
+                    "B  View completed grid",
+                    viewGridButton,
+                    white
+                );
             }
+        }
+
+
+        if (
+            screen ==
+                SCREEN_GAME
+            &&
+            confirmAction !=
+                CONFIRM_NONE
+        )
+        {
+            SDL_Rect dim =
+            {
+                0,
+                0,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT
+            };
+
+
+            setColor(
+                renderer,
+                SDL_Color{
+                    0,
+                    0,
+                    0,
+                    165
+                }
+            );
+
+
+            SDL_RenderFillRect(
+                renderer,
+                &dim
+            );
+
+
+            SDL_Rect confirmPanel =
+            {
+                340,
+                255,
+                600,
+                280
+            };
+
+
+            drawCard(
+                renderer,
+                confirmPanel,
+                panel,
+                border,
+                5
+            );
+
+
+            const char* confirmTitle =
+                "";
+
+
+            const char* confirmLine1 =
+                "";
+
+
+            const char* confirmLine2 =
+                "";
+
+
+            if (
+                confirmAction ==
+                    CONFIRM_NEW_PUZZLE
+            )
+            {
+                confirmTitle =
+                    "START NEW PUZZLE?";
+
+                confirmLine1 =
+                    "Current progress will be lost.";
+            }
+
+            else if (
+                confirmAction ==
+                    CONFIRM_SETTINGS
+            )
+            {
+                confirmTitle =
+                    "OPEN SETTINGS?";
+
+                confirmLine1 =
+                    "Your current puzzle will be kept.";
+
+                confirmLine2 =
+                    "Changes apply to the next puzzle.";
+            }
+
+            else if (
+                confirmAction ==
+                    CONFIRM_EXIT
+            )
+            {
+                confirmTitle =
+                    "EXIT POKEDOKU-NX?";
+
+                confirmLine1 =
+                    "Current progress will be lost.";
+            }
+
+
+            SDL_Rect confirmTitleArea =
+            {
+                confirmPanel.x + 25,
+                confirmPanel.y + 30,
+                confirmPanel.w - 50,
+                45
+            };
+
+
+            drawTextCentered(
+                renderer,
+                bigFont,
+                confirmTitle,
+                confirmTitleArea,
+                white
+            );
+
+
+            SDL_Rect confirmLineArea =
+            {
+                confirmPanel.x + 25,
+                confirmPanel.y + 96,
+                confirmPanel.w - 50,
+                32
+            };
+
+
+            drawTextCentered(
+                renderer,
+                smallFont,
+                confirmLine1,
+                confirmLineArea,
+                muted
+            );
+
+
+            if (
+                confirmLine2[0] !=
+                    '\0'
+            )
+            {
+                SDL_Rect confirmLine2Area =
+                {
+                    confirmPanel.x + 25,
+                    confirmPanel.y + 126,
+                    confirmPanel.w - 50,
+                    32
+                };
+
+
+                drawTextCentered(
+                    renderer,
+                    smallFont,
+                    confirmLine2,
+                    confirmLine2Area,
+                    blueAccent
+                );
+            }
+
+
+            SDL_Rect confirmButton =
+            {
+                455,
+                454,
+                175,
+                52
+            };
+
+
+            SDL_Rect cancelButton =
+            {
+                650,
+                454,
+                175,
+                52
+            };
+
+
+            drawCard(
+                renderer,
+                confirmButton,
+                panelSelected,
+                border,
+                3
+            );
+
+
+            drawCard(
+                renderer,
+                cancelButton,
+                panelBright,
+                border,
+                3
+            );
+
+
+            drawTextCentered(
+                renderer,
+                smallFont,
+                "A  Confirm",
+                confirmButton,
+                white
+            );
+
+
+            drawTextCentered(
+                renderer,
+                smallFont,
+                "B  Cancel",
+                cancelButton,
+                white
+            );
         }
 
 

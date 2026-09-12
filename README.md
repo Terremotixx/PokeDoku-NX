@@ -17,7 +17,7 @@ PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories 
 - Gigantamax forms
 - Regional Forms from Alola, Galar, Hisui and Paldea
 - Touchscreen support
-- Pokémon sprites displayed directly on the completed grid
+- Pokémon sprites displayed directly on the completed grid, with improved centering and sizing
 - Persistent settings saved to the SD card
 - Optional timer
 - Unlimited PP mode
@@ -26,6 +26,9 @@ PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories 
 - Searchable Pokémon selector
 - Name filtering
 - Direct National Pokédex number jump
+- Confirmation prompts during active puzzles for New Puzzle, Settings and Exit
+- Settings opened mid-puzzle preserve the current board; changed settings apply to the next puzzle
+- After completing a puzzle, press **B** on the result screen to view the completed grid
 - Wrong guesses are blocked only for the current cell
 - Completed Pokémon cannot be reused elsewhere on the same puzzle
 
@@ -64,10 +67,11 @@ Baby, Dual Type, First Partner, Fossil, Gmax, Legendary, Mega, Monotype, Mythica
 
 - **D-Pad / Left Stick** — Move between cells
 - **A** — Open Pokémon selector
-- **X** — New Puzzle
-- **Y** — Settings
-- **+** — Exit
+- **X** — New Puzzle (confirmation shown once the puzzle has progress)
+- **Y** — Settings (confirmation shown once the puzzle has progress)
+- **+** — Exit (confirmation shown once the puzzle has progress)
 - **Touch** — Select cells and use on-screen controls
+- After a completed puzzle: **B** — View completed grid
 
 ### Pokémon selector
 
@@ -173,6 +177,6 @@ PokeDoku-NX is a non-commercial fan-made homebrew project created for educationa
 
 ## Version
 
-**PokeDoku-NX v1.0.0**
+**PokeDoku-NX v1.1.0**
 
 Author: **Terremotixx**
