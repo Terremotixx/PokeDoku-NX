@@ -1,0 +1,25 @@
+# Build output
+build/
+release/
+cache/
+
+# devkitPro / Nintendo Switch build artifacts
+*.o
+*.d
+*.elf
+*.nro
+*.nacp
+*.map
+*.lst
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
