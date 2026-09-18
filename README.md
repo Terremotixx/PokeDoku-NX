@@ -220,7 +220,8 @@ Total entries:   1213
 - **PokéAPI** — Pokémon data used by the project: https://pokeapi.co/
 - **PokéAPI sprites repository** — source for the standard Pokémon sprites: https://github.com/PokeAPI/sprites
 - **Mega Zygarde custom sprite** — source post by `@kingofthexroad5`: https://x.com/kingofthexroad5/status/1979702959933157509
-- **@CinderyLofi** — arrangements/recordings used in the optional default music collection; credited according to the creator's stated usage terms
+- **Default background music** — arrangements/recordings from this YouTube channel: https://www.youtube.com/channel/UCCOBBs4V4WPAFR_G30W6kLw
+- **Freesound** — source of the sound effects used in the app: https://freesound.org/
 - **devkitPro / devkitA64 / libnx** — Nintendo Switch homebrew toolchain
 - **SDL2, SDL2_image, SDL2_ttf and SDL2_mixer** — rendering, image/font loading and audio playback
 
