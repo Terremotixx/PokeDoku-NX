@@ -23,7 +23,7 @@ ROMFS       := romfs
 
 APP_TITLE   := PokeDoku-NX
 APP_AUTHOR  := Terremotixx
-APP_VERSION := 1.1.0
+APP_VERSION := 1.2.0
 ICON        := icon.jpg
 
 #---------------------------------------------------------------------------------
@@ -42,7 +42,7 @@ CFLAGS := -g -Wall -O2 -ffunction-sections -fdata-sections \
 	$(ARCH) $(DEFINES)
 
 CFLAGS += $(INCLUDE) -D__SWITCH__ \
-	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_SWITCH) pkg-config --cflags SDL2_image SDL2_ttf)
+	$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_SWITCH) pkg-config --cflags SDL2_image SDL2_ttf SDL2_mixer)
 
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++17
 
@@ -51,7 +51,7 @@ ASFLAGS := -g $(ARCH)
 LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
 	-Wl,-Map,$(notdir $*.map) -Wl,--gc-sections
 
-LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_SWITCH) pkg-config --libs --static SDL2_image SDL2_ttf) -lnx
+LIBS := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH_SWITCH) pkg-config --libs --static SDL2_image SDL2_ttf SDL2_mixer) -lnx
 
 LIBDIRS := $(PORTLIBS) $(LIBNX)
 
