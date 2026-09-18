@@ -169,6 +169,14 @@ REGION_ADJECTIVES = {
 }
 
 
+REGION_NAMES_SPANISH = {
+    "GEN_ALOLA": "Alola",
+    "GEN_GALAR": "Galar",
+    "GEN_HISUI": "Hisui",
+    "GEN_PALDEA": "Paldea",
+}
+
+
 # ============================================================
 # FIRST PARTNER
 # ============================================================
@@ -344,14 +352,14 @@ def get_id_from_url(url):
 
 
 # ============================================================
-# ENGLISH NAME
+# LOCALIZED NAMES
 # ============================================================
 
-def get_english_name(data):
+def get_localized_name(data, language_code):
     for item in data.get("names", []):
         if (
             item.get("language", {}).get("name")
-            == "en"
+            == language_code
         ):
             name = item.get("name")
 
@@ -361,11 +369,31 @@ def get_english_name(data):
     return None
 
 
-def get_species_english_name(species_data):
-    english = get_english_name(species_data)
+def get_english_name(data):
+    return get_localized_name(data, "en")
 
-    if english:
-        return english
+
+def get_spanish_name(data):
+    return get_localized_name(data, "es")
+
+
+def get_species_name(species_data, language_code):
+    localized = get_localized_name(
+        species_data,
+        language_code,
+    )
+
+    if localized:
+        return localized
+
+    # Spanish falls back to the English official name before using
+    # the API slug. This keeps the generated database readable even
+    # if one localized PokeAPI entry is temporarily missing.
+    if language_code != "en":
+        english = get_english_name(species_data)
+
+        if english:
+            return english
 
     return (
         species_data
@@ -373,6 +401,14 @@ def get_species_english_name(species_data):
         .replace("-", " ")
         .title()
     )
+
+
+def get_species_english_name(species_data):
+    return get_species_name(species_data, "en")
+
+
+def get_species_spanish_name(species_data):
+    return get_species_name(species_data, "es")
 
 
 # ============================================================
@@ -463,6 +499,10 @@ def load_base_species(species_url):
         species_data
     )
 
+    display_name_spanish = get_species_spanish_name(
+        species_data
+    )
+
     default_variety_url = get_default_variety_url(
         species_data
     )
@@ -495,6 +535,7 @@ def load_base_species(species_url):
         "species_id": species_id,
         "sprite_id": sprite_id,
         "name": display_name,
+        "name_spanish": display_name_spanish,
         "api_species_name": species_data.get("name", ""),
         "types": types,
         "type_count": len(types),
@@ -550,6 +591,89 @@ def make_regional_form_display_name(
         return f"{adjective} {base_name}"
 
     return f"{adjective} {base_name}"
+
+
+def make_regional_form_display_name_spanish(
+    pokemon_name,
+    base_entry,
+    regional_region,
+):
+    region_name = REGION_NAMES_SPANISH.get(
+        regional_region,
+        "Regional",
+    )
+
+    base_name = base_entry["name_spanish"]
+
+    # Spain Spanish terminology for the three Paldean Tauros forms.
+    if pokemon_name == "tauros-paldea-combat-breed":
+        return f"{base_name} de Paldea (Variedad Combatiente)"
+
+    if pokemon_name == "tauros-paldea-blaze-breed":
+        return f"{base_name} de Paldea (Variedad Ardiente)"
+
+    if pokemon_name == "tauros-paldea-aqua-breed":
+        return f"{base_name} de Paldea (Variedad Acuática)"
+
+    return f"{base_name} de {region_name}"
+
+
+def make_form_display_name_spanish(
+    form_data,
+    pokemon_name,
+    base_entry,
+    is_mega,
+    is_gmax,
+    regional_region,
+):
+    if regional_region is not None:
+        return make_regional_form_display_name_spanish(
+            pokemon_name,
+            base_entry,
+            regional_region,
+        )
+
+    base_name = base_entry["name_spanish"]
+    species_slug = base_entry["api_species_name"]
+
+    suffix = pokemon_name
+    prefix = species_slug + "-"
+
+    if pokemon_name.startswith(prefix):
+        suffix = pokemon_name[len(prefix):]
+
+    if is_gmax:
+        # Official Spanish usage places Gigamax after the Pokémon name.
+        return f"{base_name} Gigamax"
+
+    if is_mega:
+        mega_suffix = suffix
+
+        if mega_suffix.startswith("mega-"):
+            mega_suffix = mega_suffix[len("mega-"):]
+        elif mega_suffix == "mega":
+            mega_suffix = ""
+
+        if mega_suffix:
+            formatted_suffix = (
+                mega_suffix
+                .replace("-", " ")
+                .upper()
+            )
+
+            return (
+                f"Mega-{base_name} "
+                f"{formatted_suffix}"
+            )
+
+        return f"Mega-{base_name}"
+
+    spanish_name = get_spanish_name(form_data)
+
+    if spanish_name:
+        return spanish_name
+
+    return base_name
 
 
 def make_form_display_name(
@@ -742,6 +866,15 @@ def load_special_form(
         regional_region,
     )
 
+    display_name_spanish = make_form_display_name_spanish(
+        form_data,
+        pokemon_name,
+        base_entry,
+        is_mega,
+        is_gmax,
+        regional_region,
+    )
+
     # ========================================================
     # POKEDOKU REGION / FORM RULES USED BY POKEDOKU-NX
     # ========================================================
@@ -778,6 +911,7 @@ def load_special_form(
         "species_id": species_id,
         "sprite_id": sprite_id,
         "name": display_name,
+        "name_spanish": display_name_spanish,
         "api_species_name": base_entry["api_species_name"],
         "types": types,
         "type_count": len(types),
@@ -890,6 +1024,7 @@ def write_header(entries):
         file.write("    int id;\n")
         file.write("    int spriteId;\n")
         file.write("    const char* name;\n")
+        file.write("    const char* nameSpanish;\n")
         file.write("    uint32_t types;\n")
         file.write("    uint8_t typeCount;\n")
         file.write("    PokemonGeneration generation;\n")
@@ -917,6 +1052,7 @@ def write_header(entries):
             file.write(f"{pokemon['id']}, ")
             file.write(f"{pokemon['sprite_id']}, ")
             file.write(f"{cpp_string(pokemon['name'])}, ")
+            file.write(f"{cpp_string(pokemon['name_spanish'])}, ")
             file.write(f"{cpp_types(pokemon['types'])}, ")
             file.write(f"{pokemon['type_count']}, ")
             file.write(f"{pokemon['generation']}, ")

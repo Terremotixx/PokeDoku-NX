@@ -3,6 +3,7 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
 
 #include "pokemon_data.h"
 #include "evolution_data.h"
@@ -16,6 +17,9 @@
 #include <string>
 #include <climits>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <vector>
+#include <algorithm>
 
 
 // ============================================================
@@ -25,8 +29,15 @@
 const int SCREEN_WIDTH  = 1280;
 const int SCREEN_HEIGHT = 720;
 
-const int REPEAT_DELAY = 18;
-const int REPEAT_RATE  = 4;
+const int REPEAT_DELAY = 14;
+
+// Pokemon selector layout/navigation.
+const int SELECTOR_VISIBLE_ROWS = 7;
+const int SELECTOR_PAGE_STEP = 7;
+const int SELECTOR_LIST_Y = 112;
+const int SELECTOR_ROW_HEIGHT = 72;
+const int SELECTOR_ROW_SPACING = 72;
+const int SELECTOR_SPRITE_SIZE = 68;
 
 const int MAX_MISTAKES = 9;
 const Uint32 WIN_RESULT_DELAY_MS = 1000;
@@ -37,11 +48,725 @@ const int SETTINGS_SWIPE_STEP  = 36;
 
 const int SEARCH_QUERY_SIZE = 64;
 
+// Minimum horizontal breathing room between board-header text and card borders.
+const int HEADER_HORIZONTAL_PADDING = 10;
+
 const char* SETTINGS_DIR =
     "sdmc:/switch/PokeDoku-NX";
 
 const char* SETTINGS_PATH =
     "sdmc:/switch/PokeDoku-NX/settings.ini";
+
+
+const char* CUSTOM_MUSIC_DIR =
+    "sdmc:/switch/PokeDoku-NX/music";
+
+
+static bool spanishLanguage =
+    false;
+
+
+const char* tr(
+    const char* english,
+    const char* spanish
+)
+{
+    return
+        spanishLanguage
+        ? spanish
+        : english;
+}
+
+
+bool detectSpanishSystemLanguage()
+{
+    bool useSpanish =
+        false;
+
+
+    Result rc =
+        setInitialize();
+
+
+    if (
+        R_SUCCEEDED(
+            rc
+        )
+    )
+    {
+        u64 languageCode =
+            0;
+
+
+        SetLanguage language =
+            SetLanguage_ENUS;
+
+
+        rc =
+            setGetSystemLanguage(
+                &languageCode
+            );
+
+
+        if (
+            R_SUCCEEDED(
+                rc
+            )
+        )
+        {
+            rc =
+                setMakeLanguage(
+                    languageCode,
+                    &language
+                );
+        }
+
+
+        if (
+            R_SUCCEEDED(
+                rc
+            )
+        )
+        {
+            useSpanish =
+                language ==
+                    SetLanguage_ES
+                ||
+                language ==
+                    SetLanguage_ES419;
+        }
+
+
+        setExit();
+    }
+
+
+    return useSpanish;
+}
+
+
+// ============================================================
+// AUDIO / MUSIC
+// ============================================================
+
+// RNG is implemented later in the file. Music shuffle uses it.
+int randomInt(
+    int maximum
+);
+
+
+enum SfxType
+{
+    SFX_MOVE,
+    SFX_SELECT,
+    SFX_BACK,
+    SFX_OPEN,
+    SFX_CLOSE,
+    SFX_TOGGLE,
+    SFX_CORRECT,
+    SFX_WRONG,
+    SFX_WIN,
+    SFX_LOSE,
+    SFX_COUNT
+};
+
+
+static Mix_Chunk* sfxChunks[SFX_COUNT] = {};
+
+static bool mixerAudioReady = false;
+
+static Mix_Music* currentMusic = nullptr;
+
+static std::vector<std::string> musicTracks;
+static std::vector<int> musicShuffleOrder;
+
+static int musicShufflePosition = 0;
+static int lastMusicTrackIndex = -1;
+
+static bool musicPlaybackBroken = false;
+
+
+bool hasMusicExtension(
+    const std::string& filename
+)
+{
+    size_t dot =
+        filename.find_last_of('.');
+
+
+    if (
+        dot == std::string::npos
+    )
+    {
+        return false;
+    }
+
+
+    std::string extension =
+        filename.substr(dot);
+
+
+    for (
+        char& character : extension
+    )
+    {
+        if (
+            character >= 'A' &&
+            character <= 'Z'
+        )
+        {
+            character =
+                character - 'A' + 'a';
+        }
+    }
+
+
+    return
+        extension == ".ogg" ||
+        extension == ".mp3";
+}
+
+
+void scanMusicDirectory(
+    const char* directoryPath,
+    std::vector<std::string>& destination
+)
+{
+    DIR* directory =
+        opendir(directoryPath);
+
+
+    if (!directory)
+        return;
+
+
+    struct dirent* entry = nullptr;
+
+
+    while (
+        (
+            entry = readdir(directory)
+        ) != nullptr
+    )
+    {
+        const char* name =
+            entry->d_name;
+
+
+        if (
+            std::strcmp(name, ".") == 0 ||
+            std::strcmp(name, "..") == 0
+        )
+        {
+            continue;
+        }
+
+
+        std::string filename(name);
+
+
+        if (
+            !hasMusicExtension(filename)
+        )
+        {
+            continue;
+        }
+
+
+        std::string fullPath =
+            directoryPath;
+
+
+        if (
+            !fullPath.empty() &&
+            fullPath.back() != '/'
+        )
+        {
+            fullPath += '/';
+        }
+
+
+        fullPath += filename;
+
+
+        destination.push_back(
+            fullPath
+        );
+    }
+
+
+    closedir(directory);
+}
+
+
+void rebuildMusicShuffleOrder()
+{
+    musicShuffleOrder.clear();
+
+
+    for (
+        int index = 0;
+        index < (int)musicTracks.size();
+        index++
+    )
+    {
+        musicShuffleOrder.push_back(
+            index
+        );
+    }
+
+
+    for (
+        int index =
+            (int)musicShuffleOrder.size() - 1;
+        index > 0;
+        index--
+    )
+    {
+        int other =
+            randomInt(
+                index + 1
+            );
+
+
+        std::swap(
+            musicShuffleOrder[index],
+            musicShuffleOrder[other]
+        );
+    }
+
+
+    // When a new shuffle cycle starts, do not immediately repeat
+    // the song that closed the previous cycle.
+    if (
+        musicShuffleOrder.size() > 1 &&
+        lastMusicTrackIndex >= 0 &&
+        musicShuffleOrder[0] ==
+            lastMusicTrackIndex
+    )
+    {
+        std::swap(
+            musicShuffleOrder[0],
+            musicShuffleOrder[1]
+        );
+    }
+
+
+    musicShufflePosition = 0;
+}
+
+
+void initializeMusicPlaylist()
+{
+    // All background music lives on the SD card so users can freely
+    // add to, replace or remove the soundtrack without rebuilding the NRO.
+    mkdir(
+        SETTINGS_DIR,
+        0777
+    );
+
+
+    mkdir(
+        CUSTOM_MUSIC_DIR,
+        0777
+    );
+
+
+    musicTracks.clear();
+
+
+    scanMusicDirectory(
+        CUSTOM_MUSIC_DIR,
+        musicTracks
+    );
+
+
+    std::sort(
+        musicTracks.begin(),
+        musicTracks.end()
+    );
+
+
+    musicPlaybackBroken = false;
+    lastMusicTrackIndex = -1;
+
+
+    rebuildMusicShuffleOrder();
+}
+
+bool loadSfxChunk(
+    SfxType type,
+    const char* path
+)
+{
+    if (
+        !mixerAudioReady ||
+        type < 0 ||
+        type >= SFX_COUNT
+    )
+    {
+        return false;
+    }
+
+
+    Mix_Chunk* chunk =
+        Mix_LoadWAV(path);
+
+
+    if (!chunk)
+        return false;
+
+
+    if (
+        sfxChunks[type]
+    )
+    {
+        Mix_FreeChunk(
+            sfxChunks[type]
+        );
+    }
+
+
+    sfxChunks[type] =
+        chunk;
+
+
+    return true;
+}
+
+
+bool initGameAudio()
+{
+    // Support both OGG and MP3 files from the user-editable SD-card
+    // music folder. SDL_mixer can still open even if one optional
+    // decoder is unavailable.
+    Mix_Init(
+        MIX_INIT_OGG |
+        MIX_INIT_MP3
+    );
+
+
+    if (
+        Mix_OpenAudio(
+            48000,
+            MIX_DEFAULT_FORMAT,
+            2,
+            1024
+        ) < 0
+    )
+    {
+        Mix_Quit();
+
+        return false;
+    }
+
+
+    mixerAudioReady = true;
+
+
+    Mix_AllocateChannels(16);
+
+
+    // Keep background music below the UI sound effects.
+    Mix_VolumeMusic(54);
+
+
+    loadSfxChunk(
+        SFX_MOVE,
+        "romfs:/sfx/move.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_SELECT,
+        "romfs:/sfx/select.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_BACK,
+        "romfs:/sfx/back.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_OPEN,
+        "romfs:/sfx/open.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_CLOSE,
+        "romfs:/sfx/close.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_TOGGLE,
+        "romfs:/sfx/toggle.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_CORRECT,
+        "romfs:/sfx/correct.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_WRONG,
+        "romfs:/sfx/wrong.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_WIN,
+        "romfs:/sfx/win.wav"
+    );
+
+
+    loadSfxChunk(
+        SFX_LOSE,
+        "romfs:/sfx/lose.wav"
+    );
+
+
+    return true;
+}
+
+
+void freeCurrentMusic()
+{
+    if (
+        currentMusic
+    )
+    {
+        Mix_FreeMusic(
+            currentMusic
+        );
+
+
+        currentMusic =
+            nullptr;
+    }
+}
+
+
+bool startNextMusicTrack()
+{
+    if (
+        !mixerAudioReady ||
+        musicTracks.empty() ||
+        musicPlaybackBroken
+    )
+    {
+        return false;
+    }
+
+
+    Mix_HaltMusic();
+    freeCurrentMusic();
+
+
+    int attempts =
+        (int)musicTracks.size();
+
+
+    while (
+        attempts-- > 0
+    )
+    {
+        if (
+            musicShufflePosition >=
+                (int)musicShuffleOrder.size()
+        )
+        {
+            rebuildMusicShuffleOrder();
+        }
+
+
+        if (
+            musicShuffleOrder.empty()
+        )
+        {
+            return false;
+        }
+
+
+        int trackIndex =
+            musicShuffleOrder[
+                musicShufflePosition
+            ];
+
+
+        musicShufflePosition++;
+
+
+        currentMusic =
+            Mix_LoadMUS(
+                musicTracks[
+                    trackIndex
+                ].c_str()
+            );
+
+
+        if (!currentMusic)
+            continue;
+
+
+        if (
+            Mix_PlayMusic(
+                currentMusic,
+                0
+            ) == 0
+        )
+        {
+            lastMusicTrackIndex =
+                trackIndex;
+
+
+            return true;
+        }
+
+
+        freeCurrentMusic();
+    }
+
+
+    // Nothing in the SD-card playlist could be decoded. Leave the
+    // game running normally and avoid retrying every frame.
+    musicPlaybackBroken = true;
+
+
+    return false;
+}
+
+
+void updateMusicPlayback(
+    bool enabled
+)
+{
+    if (
+        !mixerAudioReady
+    )
+    {
+        return;
+    }
+
+
+    if (
+        !enabled
+    )
+    {
+        if (
+            Mix_PlayingMusic() &&
+            !Mix_PausedMusic()
+        )
+        {
+            Mix_PauseMusic();
+        }
+
+
+        return;
+    }
+
+
+    if (
+        Mix_PausedMusic()
+    )
+    {
+        Mix_ResumeMusic();
+
+        return;
+    }
+
+
+    if (
+        !Mix_PlayingMusic()
+    )
+    {
+        startNextMusicTrack();
+    }
+}
+
+
+void shutdownGameAudio()
+{
+    if (
+        mixerAudioReady
+    )
+    {
+        Mix_HaltMusic();
+    }
+
+
+    freeCurrentMusic();
+
+
+    for (
+        int i = 0;
+        i < SFX_COUNT;
+        i++
+    )
+    {
+        if (
+            sfxChunks[i]
+        )
+        {
+            Mix_FreeChunk(
+                sfxChunks[i]
+            );
+
+
+            sfxChunks[i] =
+                nullptr;
+        }
+    }
+
+
+    if (
+        mixerAudioReady
+    )
+    {
+        Mix_CloseAudio();
+
+
+        mixerAudioReady = false;
+    }
+
+
+    Mix_Quit();
+}
+
+
+void playSfx(
+    SfxType type,
+    bool enabled
+)
+{
+    if (
+        !enabled ||
+        !mixerAudioReady ||
+        type < 0 ||
+        type >= SFX_COUNT ||
+        !sfxChunks[type]
+    )
+    {
+        return;
+    }
+
+
+    // Channel 0 intentionally mimics the previous behavior where
+    // a new UI sound replaced the previous one instead of stacking.
+    Mix_HaltChannel(0);
+
+
+    Mix_PlayChannel(
+        0,
+        sfxChunks[type],
+        0
+    );
+}
 
 
 // ============================================================
@@ -340,6 +1065,197 @@ const char* groupNames[GROUP_COUNT] =
 };
 
 
+const char* groupNamesSpanish[GROUP_COUNT] =
+{
+    "Tipos",
+    "Regiones",
+    "Evolución",
+    "Movimientos",
+    "Habilidades",
+    "Otros"
+};
+
+
+const char* categoryNamesSpanish[] =
+{
+    // TYPES
+    "NORMAL",
+    "FUEGO",
+    "AGUA",
+    "ELÉCTRICO",
+    "PLANTA",
+    "HIELO",
+    "LUCHA",
+    "VENENO",
+    "TIERRA",
+    "VOLADOR",
+    "PSÍQUICO",
+    "BICHO",
+    "ROCA",
+    "FANTASMA",
+    "DRAGÓN",
+    "SINIESTRO",
+    "ACERO",
+    "HADA",
+
+    // REGIONS
+    "KANTO",
+    "JOHTO",
+    "HOENN",
+    "SINNOH",
+    "TESELIA",
+    "KALOS",
+    "ALOLA",
+    "GALAR",
+    "HISUI",
+    "PALDEA",
+
+    // EVOLUTION
+    "PRIMERA ETAPA",
+    "ETAPA INTERMEDIA",
+    "ETAPA FINAL",
+    "SIN LÍNEA EVOLUTIVA",
+    "PUEDE EVOLUCIONAR",
+    "EVOLUCIÓN POR NIVEL",
+    "EVOLUCIÓN POR OBJETO",
+    "EVOLUCIÓN POR INTERCAMBIO",
+    "EVOLUCIÓN POR AMISTAD",
+    "EVOLUCIÓN RAMIFICADA",
+
+    // MOVES
+    "ACROBATA",
+    "DEMOLICIÓN",
+    "PAZ MENTAL",
+    "A BOCAJARRO",
+    "TRITURAR",
+    "BRILLO MÁGICO",
+    "TERREMOTO",
+    "LANZALLAMAS",
+    "VUELO",
+    "HIDROBOMBA",
+    "RAYO HIELO",
+    "PUÑO HIELO",
+    "METRÓNOMO",
+    "PROTECCIÓN",
+    "PSÍQUICO",
+    "HOJA AFILADA",
+    "BOLA SOMBRA",
+    "SURF",
+    "BOMBA LODO",
+    "PLUMERAZO",
+    "RAYO",
+
+    // ABILITIES
+    "INTIMIDACIÓN",
+    "VISTA LINCE",
+    "LEVITACIÓN",
+    "ROBUSTEZ",
+    "NADO RÁPIDO",
+
+    // OTHER
+    "BEBÉ",
+    "DOBLE TIPO",
+    "POKÉMON INICIAL",
+    "FÓSIL",
+    "GMAX",
+    "LEGENDARIO",
+    "MEGA",
+    "MONOTIPO",
+    "MÍTICO",
+    "PARADOJA",
+    "ULTRAENTE",
+    "FORMA REGIONAL"
+};
+
+
+const char* localizedGroupName(
+    int group
+)
+{
+    if (
+        group < 0
+        ||
+        group >= GROUP_COUNT
+    )
+    {
+        return "";
+    }
+
+
+    return
+        spanishLanguage
+        ? groupNamesSpanish[group]
+        : groupNames[group];
+}
+
+
+const char* localizedCategoryName(
+    const Category& category
+)
+{
+    if (
+        !spanishLanguage
+    )
+    {
+        return category.name;
+    }
+
+
+    for (
+        int index = 0;
+        index < CATEGORY_COUNT;
+        index++
+    )
+    {
+        if (
+            std::strcmp(
+                category.name,
+                allCategories[index].name
+            ) == 0
+        )
+        {
+            return
+                categoryNamesSpanish[
+                    index
+                ];
+        }
+    }
+
+
+    return category.name;
+}
+
+
+const char* localizedPokemonName(
+    int pokemonIndex
+)
+{
+    if (
+        pokemonIndex < 0
+        ||
+        pokemonIndex >= POKEMON_COUNT
+    )
+    {
+        return "";
+    }
+
+
+    if (
+        spanishLanguage
+        &&
+        pokemonData[pokemonIndex].nameSpanish != nullptr
+        &&
+        pokemonData[pokemonIndex].nameSpanish[0] != '\0'
+    )
+    {
+        return pokemonData[pokemonIndex].nameSpanish;
+    }
+
+
+    return pokemonData[pokemonIndex].name;
+}
+
+
 // ============================================================
 // SETTINGS
 // ============================================================
@@ -350,6 +1266,10 @@ struct UnlimitedSettings
     bool softLockGuard;
     bool allowSingleAnswers;
     bool enableTimer;
+
+    bool lightTheme;
+    bool musicEnabled;
+    bool sfxEnabled;
 
     bool categoryEnabled[CATEGORY_COUNT];
 };
@@ -415,7 +1335,8 @@ enum TouchContext
     TOUCH_BOARD,
     TOUCH_SELECTOR,
     TOUCH_RESULT,
-    TOUCH_CONFIRM
+    TOUCH_CONFIRM,
+    TOUCH_QUICK_MENU
 };
 
 
@@ -739,6 +1660,18 @@ void setDefaultSettings(
         false;
 
 
+    settings.lightTheme =
+        false;
+
+
+    settings.musicEnabled =
+        false;
+
+
+    settings.sfxEnabled =
+        true;
+
+
     for (
         int i = 0;
         i < CATEGORY_COUNT;
@@ -774,7 +1707,7 @@ bool saveSettings(
 
     std::fprintf(
         file,
-        "version=2\n"
+        "version=3\n"
     );
 
 
@@ -809,6 +1742,33 @@ bool saveSettings(
         file,
         "enable_timer=%d\n",
         settings.enableTimer
+            ? 1
+            : 0
+    );
+
+
+    std::fprintf(
+        file,
+        "light_theme=%d\n",
+        settings.lightTheme
+            ? 1
+            : 0
+    );
+
+
+    std::fprintf(
+        file,
+        "music_enabled=%d\n",
+        settings.musicEnabled
+            ? 1
+            : 0
+    );
+
+
+    std::fprintf(
+        file,
+        "sfx_enabled=%d\n",
+        settings.sfxEnabled
             ? 1
             : 0
     );
@@ -980,6 +1940,39 @@ bool loadSettings(
         }
 
         else if (
+            std::strcmp(
+                key,
+                "light_theme"
+            ) == 0
+        )
+        {
+            settings.lightTheme =
+                boolValue;
+        }
+
+        else if (
+            std::strcmp(
+                key,
+                "music_enabled"
+            ) == 0
+        )
+        {
+            settings.musicEnabled =
+                boolValue;
+        }
+
+        else if (
+            std::strcmp(
+                key,
+                "sfx_enabled"
+            ) == 0
+        )
+        {
+            settings.sfxEnabled =
+                boolValue;
+        }
+
+        else if (
             std::strncmp(
                 key,
                 "category_",
@@ -1054,6 +2047,78 @@ std::string normalizeSearchText(
     {
         unsigned char character =
             *current;
+
+
+        // Fold the Spanish/Latin UTF-8 letters used by Pokémon names
+        // so searches work both with and without accents:
+        // "Código" == "codigo", "Flabébé" == "flabebe", etc.
+        if (
+            character == 0xC3
+            &&
+            current[1] != 0
+        )
+        {
+            unsigned char second =
+                current[1];
+
+
+            char folded =
+                '\0';
+
+
+            switch (second)
+            {
+                case 0x80: case 0x81: case 0x82: case 0x83:
+                case 0x84: case 0x85: case 0xA0: case 0xA1:
+                case 0xA2: case 0xA3: case 0xA4: case 0xA5:
+                    folded = 'a';
+                    break;
+
+                case 0x88: case 0x89: case 0x8A: case 0x8B:
+                case 0xA8: case 0xA9: case 0xAA: case 0xAB:
+                    folded = 'e';
+                    break;
+
+                case 0x8C: case 0x8D: case 0x8E: case 0x8F:
+                case 0xAC: case 0xAD: case 0xAE: case 0xAF:
+                    folded = 'i';
+                    break;
+
+                case 0x92: case 0x93: case 0x94: case 0x95:
+                case 0x96: case 0xB2: case 0xB3: case 0xB4:
+                case 0xB5: case 0xB6:
+                    folded = 'o';
+                    break;
+
+                case 0x99: case 0x9A: case 0x9B: case 0x9C:
+                case 0xB9: case 0xBA: case 0xBB: case 0xBC:
+                    folded = 'u';
+                    break;
+
+                case 0x91: case 0xB1:
+                    folded = 'n';
+                    break;
+
+                case 0x87: case 0xA7:
+                    folded = 'c';
+                    break;
+
+                default:
+                    break;
+            }
+
+
+            if (folded != '\0')
+            {
+                result.push_back(
+                    folded
+                );
+            }
+
+
+            current += 2;
+            continue;
+        }
 
 
         if (
@@ -1530,12 +2595,31 @@ void buildPokemonSearchResults()
     {
         int score =
             getPokemonLiteralSearchScore(
-                pokemonData[
+                localizedPokemonName(
                     pokemonIndex
-                ].name,
+                ),
 
                 pokemonSearchQuery
             );
+
+
+        // In Spanish mode, keep English aliases searchable too.
+        // The displayed name still remains Spanish.
+        if (
+            score == INT_MAX
+            &&
+            spanishLanguage
+        )
+        {
+            score =
+                getPokemonLiteralSearchScore(
+                    pokemonData[
+                        pokemonIndex
+                    ].name,
+
+                    pokemonSearchQuery
+                );
+        }
 
 
         if (
@@ -1576,12 +2660,29 @@ void buildPokemonSearchResults()
         {
             int score =
                 getPokemonFuzzySearchScore(
-                    pokemonData[
+                    localizedPokemonName(
                         pokemonIndex
-                    ].name,
+                    ),
 
                     pokemonSearchQuery
                 );
+
+
+            if (
+                score == INT_MAX
+                &&
+                spanishLanguage
+            )
+            {
+                score =
+                    getPokemonFuzzySearchScore(
+                        pokemonData[
+                            pokemonIndex
+                        ].name,
+
+                        pokemonSearchQuery
+                    );
+            }
 
 
             if (
@@ -1699,6 +2800,183 @@ int getPokemonSearchResultAtOffset(
 }
 
 
+int getPokemonSelectorVisibleAtRow(
+    int selectedPokemon,
+    int row
+)
+{
+    if (
+        row < 0 ||
+        row >= SELECTOR_VISIBLE_ROWS
+    )
+    {
+        return -1;
+    }
+
+
+    int itemCount =
+        POKEMON_COUNT;
+
+
+    int selectedPosition =
+        selectedPokemon;
+
+
+    if (
+        pokemonSearchQuery[0] !=
+        '\0'
+    )
+    {
+        itemCount =
+            pokemonSearchMatchCount;
+
+
+        if (itemCount <= 0)
+        {
+            return -1;
+        }
+
+
+        selectedPosition =
+            pokemonSearchMatchPosition;
+
+
+        if (selectedPosition < 0)
+        {
+            for (
+                int i = 0;
+                i < pokemonSearchMatchCount;
+                i++
+            )
+            {
+                if (
+                    pokemonSearchMatches[i] ==
+                    selectedPokemon
+                )
+                {
+                    selectedPosition = i;
+                    break;
+                }
+            }
+        }
+
+
+        if (selectedPosition < 0)
+        {
+            selectedPosition = 0;
+        }
+    }
+
+
+    int firstPosition =
+        selectedPosition -
+        SELECTOR_VISIBLE_ROWS / 2;
+
+
+    if (firstPosition < 0)
+    {
+        firstPosition = 0;
+    }
+
+
+    int maximumFirst =
+        itemCount -
+        SELECTOR_VISIBLE_ROWS;
+
+
+    if (maximumFirst < 0)
+    {
+        maximumFirst = 0;
+    }
+
+
+    if (firstPosition > maximumFirst)
+    {
+        firstPosition =
+            maximumFirst;
+    }
+
+
+    int position =
+        firstPosition + row;
+
+
+    if (
+        position < 0 ||
+        position >= itemCount
+    )
+    {
+        return -1;
+    }
+
+
+    if (
+        pokemonSearchQuery[0] !=
+        '\0'
+    )
+    {
+        return
+            pokemonSearchMatches[position];
+    }
+
+
+    return position;
+}
+
+
+bool selectorRepeatTriggered(
+    int heldFrames,
+    bool pageJump
+)
+{
+    if (heldFrames < REPEAT_DELAY)
+    {
+        return false;
+    }
+
+
+    int repeatRate;
+
+
+    if (pageJump)
+    {
+        // L/R already moves a full page, so accelerate more gently.
+        // Step 19: faster initial repeat and a higher maximum speed.
+        if (heldFrames < 60)
+            repeatRate = 10;
+        else if (heldFrames < 120)
+            repeatRate = 6;
+        else
+            repeatRate = 4;
+    }
+
+    else
+    {
+        // D-Pad / stick progressively speeds up while held.
+        // Step 19: faster initial repeat and a higher maximum speed.
+        if (heldFrames < 60)
+            repeatRate = 4;
+        else if (heldFrames < 120)
+            repeatRate = 3;
+        else
+            repeatRate = 2;
+    }
+
+
+    return
+        (
+            (
+                heldFrames -
+                REPEAT_DELAY
+            )
+            %
+            repeatRate
+        )
+        == 0;
+}
+
+
+
 void clearPokemonSearch()
 {
     pokemonSearchQuery[0] =
@@ -1788,25 +3066,31 @@ bool openPokemonSearchKeyboard(
 
     swkbdConfigSetHeaderText(
         &keyboard,
-        "Search Pokemon"
+        tr("Search Pokemon", "Buscar Pokémon")
     );
 
 
     swkbdConfigSetSubText(
         &keyboard,
-        "Filter by name or jump to National Pokedex number"
+        tr(
+            "Filter by name or jump to National Pokedex number",
+            "Filtra por nombre o ve a un número de la Pokédex Nacional"
+        )
     );
 
 
     swkbdConfigSetGuideText(
         &keyboard,
-        "Name filters results; 260 or #260 jumps to that Pokedex entry"
+        tr(
+            "Name filters results; 260 or #260 jumps to that Pokedex entry",
+            "El nombre filtra; 260 o #260 salta a esa entrada de la Pokédex"
+        )
     );
 
 
     swkbdConfigSetOkButtonText(
         &keyboard,
-        "Search"
+        tr("Search", "Buscar")
     );
 
 
@@ -2055,6 +3339,140 @@ void drawTextCentered(
         ) / 2,
 
         color
+    );
+}
+
+
+void drawTextCenteredFit(
+    SDL_Renderer* renderer,
+    TTF_Font* font,
+    const char* text,
+    const SDL_Rect& area,
+    SDL_Color color
+)
+{
+    if (
+        !font
+        ||
+        !text
+        ||
+        area.w <= 0
+        ||
+        area.h <= 0
+    )
+    {
+        return;
+    }
+
+
+    SDL_Surface* surface =
+        TTF_RenderUTF8_Blended(
+            font,
+            text,
+            color
+        );
+
+
+    if (!surface)
+        return;
+
+
+    SDL_Texture* texture =
+        SDL_CreateTextureFromSurface(
+            renderer,
+            surface
+        );
+
+
+    if (!texture)
+    {
+        SDL_FreeSurface(
+            surface
+        );
+
+        return;
+    }
+
+
+    int destinationWidth =
+        surface->w;
+
+
+    int destinationHeight =
+        surface->h;
+
+
+    if (
+        destinationWidth > area.w
+        ||
+        destinationHeight > area.h
+    )
+    {
+        float widthScale =
+            (float)area.w /
+            (float)destinationWidth;
+
+
+        float heightScale =
+            (float)area.h /
+            (float)destinationHeight;
+
+
+        float scale =
+            widthScale < heightScale
+                ? widthScale
+                : heightScale;
+
+
+        destinationWidth =
+            (int)(
+                destinationWidth *
+                scale
+            );
+
+
+        destinationHeight =
+            (int)(
+                destinationHeight *
+                scale
+            );
+    }
+
+
+    SDL_Rect destination =
+    {
+        area.x +
+        (
+            area.w -
+            destinationWidth
+        ) / 2,
+
+        area.y +
+        (
+            area.h -
+            destinationHeight
+        ) / 2,
+
+        destinationWidth,
+        destinationHeight
+    };
+
+
+    SDL_RenderCopy(
+        renderer,
+        texture,
+        nullptr,
+        &destination
+    );
+
+
+    SDL_DestroyTexture(
+        texture
+    );
+
+
+    SDL_FreeSurface(
+        surface
     );
 }
 
@@ -2333,9 +3751,11 @@ TTF_Font* chooseAxisHeaderFont(
                         fontIndex
                     ],
 
-                    categories[
-                        categoryIndex
-                    ].name,
+                    localizedCategoryName(
+                        categories[
+                            categoryIndex
+                        ]
+                    ),
 
                     maximumWidth,
                     maximumHeight
@@ -2377,7 +3797,8 @@ void drawCategoryHeader(
         !splitHeaderText(
             font,
             text,
-            area.w - 12,
+            area.w -
+                HEADER_HORIZONTAL_PADDING * 2,
             line1,
             line2
         )
@@ -2433,20 +3854,24 @@ void drawCategoryHeader(
 
     SDL_Rect firstArea =
     {
-        area.x,
+        area.x +
+            HEADER_HORIZONTAL_PADDING,
         startY,
-        area.w,
+        area.w -
+            HEADER_HORIZONTAL_PADDING * 2,
         lineHeight
     };
 
 
     SDL_Rect secondArea =
     {
-        area.x,
+        area.x +
+            HEADER_HORIZONTAL_PADDING,
         startY +
         lineHeight +
         2,
-        area.w,
+        area.w -
+            HEADER_HORIZONTAL_PADDING * 2,
         lineHeight
     };
 
@@ -2826,9 +4251,11 @@ TTF_Font* chooseColumnHeaderFont(
                         fontIndex
                     ],
 
-                    categories[
-                        categoryIndex
-                    ].name,
+                    localizedCategoryName(
+                        categories[
+                            categoryIndex
+                        ]
+                    ),
 
                     maximumWidth,
                     maximumHeight
@@ -2876,7 +4303,8 @@ void drawColumnCategoryHeader(
         !splitColumnHeaderText(
             font,
             text,
-            area.w - 16,
+            area.w -
+                HEADER_HORIZONTAL_PADDING * 2,
             line1,
             line2,
             line3
@@ -2938,9 +4366,11 @@ void drawColumnCategoryHeader(
 
     SDL_Rect lineArea =
     {
-        area.x + 6,
+        area.x +
+            HEADER_HORIZONTAL_PADDING,
         startY,
-        area.w - 12,
+        area.w -
+            HEADER_HORIZONTAL_PADDING * 2,
         lineHeight
     };
 
@@ -4749,6 +6179,10 @@ int main(
     char* argv[]
 )
 {
+    spanishLanguage =
+        detectSpanishSystemLanguage();
+
+
     rngState =
         armGetSystemTick();
 
@@ -4781,7 +6215,8 @@ int main(
     if (
         SDL_Init(
             SDL_INIT_VIDEO |
-            SDL_INIT_TIMER
+            SDL_INIT_TIMER |
+            SDL_INIT_AUDIO
         ) < 0
     )
     {
@@ -4789,6 +6224,12 @@ int main(
 
         return 1;
     }
+
+
+    initGameAudio();
+
+
+    initializeMusicPlaylist();
 
 
     if (
@@ -4803,6 +6244,7 @@ int main(
         IMG_INIT_PNG
     )
     {
+        shutdownGameAudio();
         SDL_Quit();
         romfsExit();
 
@@ -4815,6 +6257,7 @@ int main(
     )
     {
         IMG_Quit();
+        shutdownGameAudio();
         SDL_Quit();
         romfsExit();
 
@@ -4832,6 +6275,7 @@ int main(
     {
         TTF_Quit();
         IMG_Quit();
+        shutdownGameAudio();
         SDL_Quit();
         romfsExit();
 
@@ -4855,6 +6299,7 @@ int main(
 
         TTF_Quit();
         IMG_Quit();
+        shutdownGameAudio();
         SDL_Quit();
         romfsExit();
 
@@ -4883,6 +6328,13 @@ int main(
         );
 
 
+    SDL_RWops* compactFontMemory =
+        SDL_RWFromConstMem(
+            fontData.address,
+            (int)fontData.size
+        );
+
+
     SDL_RWops* bigFontMemory =
         SDL_RWFromConstMem(
             fontData.address,
@@ -4901,6 +6353,7 @@ int main(
         !smallFontMemory ||
         !mediumFontMemory ||
         !normalFontMemory ||
+        !compactFontMemory ||
         !bigFontMemory ||
         !titleFontMemory
     )
@@ -4933,6 +6386,16 @@ int main(
         );
 
 
+    // Slightly smaller UI font for category headers and the settings list.
+    // Keeps long Spanish labels readable without crowding the cards/checkboxes.
+    TTF_Font* compactFont =
+        TTF_OpenFontRW(
+            compactFontMemory,
+            1,
+            22
+        );
+
+
     TTF_Font* bigFont =
         TTF_OpenFontRW(
             bigFontMemory,
@@ -4953,6 +6416,7 @@ int main(
         !smallFont ||
         !mediumFont ||
         !font ||
+        !compactFont ||
         !bigFont ||
         !titleFont
     )
@@ -5066,6 +6530,14 @@ int main(
 
     ConfirmAction confirmAction =
         CONFIRM_NONE;
+
+
+    bool quickMenuOpen =
+        false;
+
+
+    int quickMenuSelection =
+        0;
 
 
     SettingsFocus settingsFocus =
@@ -5248,6 +6720,11 @@ int main(
         appletMainLoop()
     )
     {
+        updateMusicPlayback(
+            settings.musicEnabled
+        );
+
+
         padUpdate(
             &pad
         );
@@ -5363,15 +6840,20 @@ int main(
 
 
             if (
-                screen ==
-                    SCREEN_GAME
-                &&
                 confirmAction !=
                     CONFIRM_NONE
             )
             {
                 touch.context =
                     TOUCH_CONFIRM;
+            }
+
+            else if (
+                quickMenuOpen
+            )
+            {
+                touch.context =
+                    TOUCH_QUICK_MENU;
             }
 
             else if (
@@ -5457,8 +6939,102 @@ int main(
 
 
         // ====================================================
-        // EXIT
+        // QUICK SETTINGS / EXIT
         // ====================================================
+
+        SDL_Rect quickSettingsHintTouch =
+        {
+            1094,
+            18,
+            172,
+            36
+        };
+
+
+        SDL_Rect quickSettingsOpenTitleTouch =
+        {
+            888,
+            40,
+            356,
+            44
+        };
+
+
+        bool touchQuickSettingsHint =
+            touchReleased
+            &&
+            !touch.moved
+            &&
+            confirmAction ==
+                CONFIRM_NONE
+            &&
+            (
+                (
+                    !quickMenuOpen
+                    &&
+                    pointInside(
+                        touch.lastX,
+                        touch.lastY,
+                        quickSettingsHintTouch
+                    )
+                )
+                ||
+                (
+                    quickMenuOpen
+                    &&
+                    pointInside(
+                        touch.lastX,
+                        touch.lastY,
+                        quickSettingsOpenTitleTouch
+                    )
+                )
+            );
+
+
+        if (
+            (
+                buttonsDown &
+                HidNpadButton_Minus
+            )
+            ||
+            touchQuickSettingsHint
+        )
+        {
+            if (
+                confirmAction ==
+                    CONFIRM_NONE
+            )
+            {
+                bool wasQuickMenuOpen =
+                    quickMenuOpen;
+
+
+                quickMenuOpen =
+                    !quickMenuOpen;
+
+
+                playSfx(
+                    wasQuickMenuOpen
+                        ? SFX_CLOSE
+                        : SFX_OPEN,
+                    settings.sfxEnabled
+                );
+
+
+                if (
+                    quickMenuOpen
+                )
+                {
+                    quickMenuSelection =
+                        0;
+                }
+
+
+                menuStickReady =
+                    false;
+            }
+        }
+
 
         if (
             (
@@ -5468,28 +7044,12 @@ int main(
             &&
             confirmAction ==
                 CONFIRM_NONE
+            &&
+            !quickMenuOpen
         )
         {
-            if (
-                screen ==
-                    SCREEN_GAME
-                &&
-                gameNeedsConfirmation(
-                    game
-                )
-            )
-            {
-                confirmAction =
-                    CONFIRM_EXIT;
-            }
-
-            else
-            {
-                running =
-                    false;
-
-                continue;
-            }
+            confirmAction =
+                CONFIRM_EXIT;
         }
 
 
@@ -5515,7 +7075,9 @@ int main(
 
         if (
             screen !=
-            SCREEN_GAME
+                SCREEN_GAME
+            ||
+            quickMenuOpen
         )
         {
             if (
@@ -5585,14 +7147,52 @@ int main(
         }
 
 
+        if (
+            confirmAction ==
+                CONFIRM_NONE
+            &&
+            (
+                (
+                    quickMenuOpen
+                    &&
+                    (
+                        navUp
+                        ||
+                        navDown
+                    )
+                )
+                ||
+                (
+                    !quickMenuOpen
+                    &&
+                    screen ==
+                        SCREEN_UNLIMITED_SETTINGS
+                    &&
+                    (
+                        navUp
+                        ||
+                        navDown
+                        ||
+                        navLeft
+                        ||
+                        navRight
+                    )
+                )
+            )
+        )
+        {
+            playSfx(
+                SFX_MOVE,
+                settings.sfxEnabled
+            );
+        }
+
+
         // ====================================================
         // CONFIRMATION INPUT
         // ====================================================
 
         if (
-            screen ==
-                SCREEN_GAME
-            &&
             confirmAction !=
                 CONFIRM_NONE
         )
@@ -5600,7 +7200,7 @@ int main(
             SDL_Rect confirmButton =
             {
                 455,
-                454,
+                414,
                 175,
                 52
             };
@@ -5609,7 +7209,7 @@ int main(
             SDL_Rect cancelButton =
             {
                 650,
-                454,
+                414,
                 175,
                 52
             };
@@ -5654,6 +7254,12 @@ int main(
                 touchCancel
             )
             {
+                playSfx(
+                    SFX_BACK,
+                    settings.sfxEnabled
+                );
+
+
                 confirmAction =
                     CONFIRM_NONE;
             }
@@ -5667,6 +7273,12 @@ int main(
                 touchConfirm
             )
             {
+                playSfx(
+                    SFX_SELECT,
+                    settings.sfxEnabled
+                );
+
+
                 ConfirmAction acceptedAction =
                     confirmAction;
 
@@ -5735,6 +7347,214 @@ int main(
 
 
         // ====================================================
+        // QUICK SETTINGS INPUT
+        // ====================================================
+
+        else if (
+            quickMenuOpen
+        )
+        {
+            SDL_Rect themeRow =
+            {
+                890,
+                108,
+                352,
+                58
+            };
+
+
+            SDL_Rect musicRow =
+            {
+                890,
+                178,
+                352,
+                58
+            };
+
+
+            SDL_Rect sfxRow =
+            {
+                890,
+                248,
+                352,
+                58
+            };
+
+
+            if (
+                navUp
+            )
+            {
+                quickMenuSelection--;
+
+
+                if (
+                    quickMenuSelection < 0
+                )
+                {
+                    quickMenuSelection =
+                        2;
+                }
+            }
+
+
+            if (
+                navDown
+            )
+            {
+                quickMenuSelection++;
+
+
+                if (
+                    quickMenuSelection > 2
+                )
+                {
+                    quickMenuSelection =
+                        0;
+                }
+            }
+
+
+            bool touchTheme =
+                touchReleased
+                &&
+                touch.context ==
+                    TOUCH_QUICK_MENU
+                &&
+                !touch.moved
+                &&
+                pointInside(
+                    touch.lastX,
+                    touch.lastY,
+                    themeRow
+                );
+
+
+            bool touchMusic =
+                touchReleased
+                &&
+                touch.context ==
+                    TOUCH_QUICK_MENU
+                &&
+                !touch.moved
+                &&
+                pointInside(
+                    touch.lastX,
+                    touch.lastY,
+                    musicRow
+                );
+
+
+            bool touchSfx =
+                touchReleased
+                &&
+                touch.context ==
+                    TOUCH_QUICK_MENU
+                &&
+                !touch.moved
+                &&
+                pointInside(
+                    touch.lastX,
+                    touch.lastY,
+                    sfxRow
+                );
+
+
+            if (touchTheme)
+                quickMenuSelection = 0;
+
+            else if (touchMusic)
+                quickMenuSelection = 1;
+
+            else if (touchSfx)
+                quickMenuSelection = 2;
+
+
+            bool activateSelection =
+                (
+                    buttonsDown &
+                    HidNpadButton_A
+                )
+                ||
+                touchTheme
+                ||
+                touchMusic
+                ||
+                touchSfx;
+
+
+            if (
+                activateSelection
+            )
+            {
+                bool sfxWasEnabled =
+                    settings.sfxEnabled;
+
+
+                switch (
+                    quickMenuSelection
+                )
+                {
+                    case 0:
+
+                        settings.lightTheme =
+                            !settings.lightTheme;
+
+                        break;
+
+
+                    case 1:
+
+                        settings.musicEnabled =
+                            !settings.musicEnabled;
+
+                        break;
+
+
+                    case 2:
+
+                        settings.sfxEnabled =
+                            !settings.sfxEnabled;
+
+                        break;
+                }
+
+
+                settingsDirty =
+                    true;
+
+
+                playSfx(
+                    SFX_TOGGLE,
+                    sfxWasEnabled
+                    ||
+                    settings.sfxEnabled
+                );
+            }
+
+
+            if (
+                buttonsDown &
+                HidNpadButton_B
+            )
+            {
+                playSfx(
+                    SFX_CLOSE,
+                    settings.sfxEnabled
+                );
+
+
+                quickMenuOpen =
+                    false;
+
+
+                menuStickReady =
+                    false;
+            }
+        }
+
+
+        // ====================================================
         // MAIN MENU INPUT
         // ====================================================
 
@@ -5776,6 +7596,12 @@ int main(
                 touchOpen
             )
             {
+                playSfx(
+                    SFX_SELECT,
+                    settings.sfxEnabled
+                );
+
+
                 screen =
                     SCREEN_UNLIMITED_SETTINGS;
 
@@ -5876,6 +7702,12 @@ int main(
                     )
                     {
                         selectedCategoryPosition++;
+
+
+                        playSfx(
+                            SFX_MOVE,
+                            settings.sfxEnabled
+                        );
                     }
 
 
@@ -5899,6 +7731,12 @@ int main(
                     )
                     {
                         selectedCategoryPosition--;
+
+
+                        playSfx(
+                            SFX_MOVE,
+                            settings.sfxEnabled
+                        );
                     }
 
 
@@ -5917,6 +7755,12 @@ int main(
                 HidNpadButton_B
             )
             {
+                playSfx(
+                    SFX_BACK,
+                    settings.sfxEnabled
+                );
+
+
                 if (
                     settingsOpenedFromGame
                 )
@@ -6156,6 +8000,12 @@ int main(
                     HidNpadButton_A
                 )
                 {
+                    playSfx(
+                        SFX_SELECT,
+                        settings.sfxEnabled
+                    );
+
+
                     if (
                         settingsFocus ==
                         SETTINGS_OPTIONS
@@ -6267,6 +8117,12 @@ int main(
                     0
                 )
                 {
+                    playSfx(
+                        SFX_SELECT,
+                        settings.sfxEnabled
+                    );
+
+
                     toggleAllGroupCategories(
                         selectedGroup,
                         settings
@@ -6333,6 +8189,12 @@ int main(
 
                             settingsFocus =
                                 SETTINGS_OPTIONS;
+
+
+                            playSfx(
+                                SFX_SELECT,
+                                settings.sfxEnabled
+                            );
 
 
                             switch (i)
@@ -6433,6 +8295,12 @@ int main(
                                 SETTINGS_GROUPS;
 
 
+                            playSfx(
+                                SFX_MOVE,
+                                settings.sfxEnabled
+                            );
+
+
                             settingsError =
                                 false;
                         }
@@ -6459,6 +8327,12 @@ int main(
                         0
                     )
                     {
+                        playSfx(
+                            SFX_SELECT,
+                            settings.sfxEnabled
+                        );
+
+
                         toggleAllGroupCategories(
                             selectedGroup,
                             settings
@@ -6547,6 +8421,12 @@ int main(
                                     ];
 
 
+                                playSfx(
+                                    SFX_SELECT,
+                                    settings.sfxEnabled
+                                );
+
+
                                 settings.categoryEnabled[
                                     categoryIndex
                                 ] =
@@ -6631,6 +8511,12 @@ int main(
                         enabledCount < 6
                     )
                     {
+                        playSfx(
+                            SFX_WRONG,
+                            settings.sfxEnabled
+                        );
+
+
                         settingsError =
                             true;
 
@@ -6639,7 +8525,10 @@ int main(
                             settingsErrorText,
                             sizeof(settingsErrorText),
 
-                            "Enable at least 6 categories."
+                            tr(
+                                "Enable at least 6 categories.",
+                                "Activa al menos 6 categorías."
+                            )
                         );
                     }
 
@@ -6650,6 +8539,12 @@ int main(
                         )
                     )
                     {
+                        playSfx(
+                            SFX_WRONG,
+                            settings.sfxEnabled
+                        );
+
+
                         settingsError =
                             true;
 
@@ -6658,12 +8553,21 @@ int main(
                             settingsErrorText,
                             sizeof(settingsErrorText),
 
-                            "No valid puzzle found. Enable more categories or relax settings."
+                            tr(
+                                "No valid puzzle found. Enable more categories or relax settings.",
+                                "No se encontró un puzzle válido. Activa más categorías o relaja los ajustes."
+                            )
                         );
                     }
 
                     else
                     {
+                        playSfx(
+                            SFX_SELECT,
+                            settings.sfxEnabled
+                        );
+
+
                         settingsError =
                             false;
 
@@ -6700,6 +8604,12 @@ int main(
                 )
             )
             {
+                playSfx(
+                    SFX_BACK,
+                    settings.sfxEnabled
+                );
+
+
                 game.resultOverlayDismissed =
                     true;
             }
@@ -6736,10 +8646,26 @@ int main(
                     -POKEMON_SWIPE_STEP
                 )
                 {
+                    int previousPokemon =
+                        game.selectedPokemon;
+
+
                     movePokemonSelection(
                         game,
                         1
                     );
+
+
+                    if (
+                        game.selectedPokemon !=
+                        previousPokemon
+                    )
+                    {
+                        playSfx(
+                            SFX_MOVE,
+                            settings.sfxEnabled
+                        );
+                    }
 
 
                     touch.swipeAccumulator +=
@@ -6752,10 +8678,26 @@ int main(
                     POKEMON_SWIPE_STEP
                 )
                 {
+                    int previousPokemon =
+                        game.selectedPokemon;
+
+
                     movePokemonSelection(
                         game,
                         -1
                     );
+
+
+                    if (
+                        game.selectedPokemon !=
+                        previousPokemon
+                    )
+                    {
+                        playSfx(
+                            SFX_MOVE,
+                            settings.sfxEnabled
+                        );
+                    }
 
 
                     touch.swipeAccumulator -=
@@ -6769,6 +8711,12 @@ int main(
                 HidNpadButton_Y
             )
             {
+                playSfx(
+                    SFX_SELECT,
+                    settings.sfxEnabled
+                );
+
+
                 if (
                     gameNeedsConfirmation(
                         game
@@ -6818,6 +8766,12 @@ int main(
                 HidNpadButton_X
             )
             {
+                playSfx(
+                    SFX_SELECT,
+                    settings.sfxEnabled
+                );
+
+
                 if (
                     gameNeedsConfirmation(
                         game
@@ -6853,6 +8807,26 @@ int main(
                     !game.selectorOpen
                 )
                 {
+                    if (
+                        buttonsDown &
+                        (
+                            HidNpadButton_Up
+                            |
+                            HidNpadButton_Down
+                            |
+                            HidNpadButton_Left
+                            |
+                            HidNpadButton_Right
+                        )
+                    )
+                    {
+                        playSfx(
+                            SFX_MOVE,
+                            settings.sfxEnabled
+                        );
+                    }
+
+
                     if (
                         buttonsDown &
                         HidNpadButton_Up
@@ -7011,6 +8985,12 @@ int main(
                         < 0
                     )
                     {
+                        playSfx(
+                            SFX_SELECT,
+                            settings.sfxEnabled
+                        );
+
+
                         game.selectorOpen =
                             true;
 
@@ -7057,7 +9037,7 @@ int main(
 
 
                         const int gridX =
-                590;
+                570;
 
 
                         const int gridY =
@@ -7103,6 +9083,12 @@ int main(
                                 cellSize;
 
 
+                            bool boardSelectionChanged =
+                                row != game.selectedRow
+                                ||
+                                column != game.selectedColumn;
+
+
                             game.selectedRow =
                                 row;
 
@@ -7122,6 +9108,12 @@ int main(
                                 < 0
                             )
                             {
+                                playSfx(
+                                    SFX_SELECT,
+                                    settings.sfxEnabled
+                                );
+
+
                                 game.selectorOpen =
                                     true;
 
@@ -7148,12 +9140,22 @@ int main(
                                 game.jumpRepeatFrames =
                                     0;
                             }
+
+                            else if (
+                                boardSelectionChanged
+                            )
+                            {
+                                playSfx(
+                                    SFX_MOVE,
+                                    settings.sfxEnabled
+                                );
+                            }
                         }
 
 
                         SDL_Rect touchNewPuzzle =
                         {
-                            260,
+                            270,
                             658,
                             185,
                             50
@@ -7168,6 +9170,12 @@ int main(
                             )
                         )
                         {
+                            playSfx(
+                                SFX_SELECT,
+                                settings.sfxEnabled
+                            );
+
+
                             if (
                                 gameNeedsConfirmation(
                                     game
@@ -7205,6 +9213,12 @@ int main(
                             )
                         )
                         {
+                            playSfx(
+                                SFX_SELECT,
+                                settings.sfxEnabled
+                            );
+
+
                             if (
                                 gameNeedsConfirmation(
                                     game
@@ -7250,6 +9264,12 @@ int main(
                         HidNpadButton_B
                     )
                     {
+                        playSfx(
+                            SFX_BACK,
+                            settings.sfxEnabled
+                        );
+
+
                         game.selectorOpen =
                             false;
 
@@ -7371,6 +9391,12 @@ int main(
                                 game,
                                 desiredDirection
                             );
+
+
+                            playSfx(
+                                SFX_MOVE,
+                                settings.sfxEnabled
+                            );
                         }
 
                         else
@@ -7379,23 +9405,21 @@ int main(
 
 
                             if (
-                                game.verticalRepeatFrames >=
-                                REPEAT_DELAY
-                                &&
-                                (
-                                    (
-                                        game.verticalRepeatFrames -
-                                        REPEAT_DELAY
-                                    )
-                                    %
-                                    REPEAT_RATE
+                                selectorRepeatTriggered(
+                                    game.verticalRepeatFrames,
+                                    false
                                 )
-                                == 0
                             )
                             {
                                 movePokemonSelection(
                                     game,
                                     desiredDirection
+                                );
+
+
+                                playSfx(
+                                    SFX_MOVE,
+                                    settings.sfxEnabled
                                 );
                             }
                         }
@@ -7453,7 +9477,13 @@ int main(
                                 game,
 
                                 desiredJumpDirection *
-                                10
+                                SELECTOR_PAGE_STEP
+                            );
+
+
+                            playSfx(
+                                SFX_MOVE,
+                                settings.sfxEnabled
                             );
                         }
 
@@ -7463,25 +9493,23 @@ int main(
 
 
                             if (
-                                game.jumpRepeatFrames >=
-                                REPEAT_DELAY
-                                &&
-                                (
-                                    (
-                                        game.jumpRepeatFrames -
-                                        REPEAT_DELAY
-                                    )
-                                    %
-                                    REPEAT_RATE
+                                selectorRepeatTriggered(
+                                    game.jumpRepeatFrames,
+                                    true
                                 )
-                                == 0
                             )
                             {
                                 movePokemonSelection(
                                     game,
 
                                     desiredJumpDirection *
-                                    10
+                                    SELECTOR_PAGE_STEP
+                                );
+
+
+                                playSfx(
+                                    SFX_MOVE,
+                                    settings.sfxEnabled
                                 );
                             }
                         }
@@ -7513,6 +9541,33 @@ int main(
                                     game,
                                     result
                                 );
+
+
+                                if (
+                                    result ==
+                                        ATTEMPT_CORRECT
+                                )
+                                {
+                                    playSfx(
+                                        game.gameWon
+                                            ? SFX_WIN
+                                            : SFX_CORRECT,
+                                        settings.sfxEnabled
+                                    );
+                                }
+
+                                else if (
+                                    result ==
+                                        ATTEMPT_WRONG
+                                )
+                                {
+                                    playSfx(
+                                        game.gameLost
+                                            ? SFX_LOSE
+                                            : SFX_WRONG,
+                                        settings.sfxEnabled
+                                    );
+                                }
                             }
                         }
 
@@ -7537,7 +9592,7 @@ int main(
                             SDL_Rect closeButton =
                             {
                                 974,
-                                28,
+                                22,
                                 38,
                                 38
                             };
@@ -7551,6 +9606,12 @@ int main(
                                 )
                             )
                             {
+                                playSfx(
+                                    SFX_BACK,
+                                    settings.sfxEnabled
+                                );
+
+
                                 game.selectorOpen =
                                     false;
 
@@ -7565,11 +9626,11 @@ int main(
                             else
                             {
                                 const int visibleRows =
-                                    7;
+                                    SELECTOR_VISIBLE_ROWS;
 
 
                                 const int selectorRowSpacing =
-                                    61;
+                                    SELECTOR_ROW_SPACING;
 
 
                                 for (
@@ -7582,13 +9643,13 @@ int main(
                                     {
                                         300,
 
-                                        120 +
+                                        SELECTOR_LIST_Y +
                                         i *
                                         selectorRowSpacing,
 
                                         680,
 
-                                        58
+                                        SELECTOR_ROW_HEIGHT
                                     };
 
 
@@ -7600,16 +9661,10 @@ int main(
                                         )
                                     )
                                     {
-                                        int offset =
-                                            i -
-                                            visibleRows /
-                                            2;
-
-
                                         int pokemonIndex =
-                                            getPokemonSearchResultAtOffset(
+                                            getPokemonSelectorVisibleAtRow(
                                                 game.selectedPokemon,
-                                                offset
+                                                i
                                             );
 
 
@@ -7625,11 +9680,11 @@ int main(
                                             555,
 
                                             pokemonRow.y +
-                                            10,
+                                            15,
 
                                             105,
 
-                                            38
+                                            42
                                         };
 
 
@@ -7639,6 +9694,11 @@ int main(
                                                 y,
                                                 selectButton
                                             );
+
+
+                                        bool wasSelected =
+                                            pokemonIndex ==
+                                            game.selectedPokemon;
 
 
                                         game.selectedPokemon =
@@ -7651,9 +9711,22 @@ int main(
 
 
                                         if (
+                                            !directSelect
+                                            &&
+                                            !wasSelected
+                                        )
+                                        {
+                                            playSfx(
+                                                SFX_MOVE,
+                                                settings.sfxEnabled
+                                            );
+                                        }
+
+
+                                        if (
                                             directSelect
                                             ||
-                                            offset == 0
+                                            wasSelected
                                         )
                                         {
                                             AttemptResult result =
@@ -7668,6 +9741,33 @@ int main(
                                                 game,
                                                 result
                                             );
+
+
+                                            if (
+                                                result ==
+                                                    ATTEMPT_CORRECT
+                                            )
+                                            {
+                                                playSfx(
+                                                    game.gameWon
+                                                        ? SFX_WIN
+                                                        : SFX_CORRECT,
+                                                    settings.sfxEnabled
+                                                );
+                                            }
+
+                                            else if (
+                                                result ==
+                                                    ATTEMPT_WRONG
+                                            )
+                                            {
+                                                playSfx(
+                                                    game.gameLost
+                                                        ? SFX_LOSE
+                                                        : SFX_WRONG,
+                                                    settings.sfxEnabled
+                                                );
+                                            }
                                         }
 
 
@@ -7697,7 +9797,7 @@ int main(
                 SDL_Rect newPuzzleButton =
                 {
                     405,
-                    405,
+                    390,
                     205,
                     55
                 };
@@ -7706,7 +9806,7 @@ int main(
                 SDL_Rect settingsButton =
                 {
                     670,
-                    405,
+                    390,
                     205,
                     55
                 };
@@ -7720,6 +9820,12 @@ int main(
                     )
                 )
                 {
+                    playSfx(
+                        SFX_SELECT,
+                        settings.sfxEnabled
+                    );
+
+
                     startNewPuzzle(
                         game,
                         settings
@@ -7734,6 +9840,12 @@ int main(
                     )
                 )
                 {
+                    playSfx(
+                        SFX_SELECT,
+                        settings.sfxEnabled
+                    );
+
+
                     screen =
                         SCREEN_UNLIMITED_SETTINGS;
 
@@ -7784,6 +9896,368 @@ int main(
 
             settingsDirty =
                 false;
+        }
+
+
+        // ====================================================
+        // APPLY THEME
+        // ====================================================
+
+        if (
+            settings.lightTheme
+        )
+        {
+            // Pokeball-inspired light palette:
+            // white / black / red, with neutral greys only.
+
+            nightTop =
+                SDL_Color{
+                    232,
+                    55,
+                    63,
+                    255
+                };
+
+
+            nightBottom =
+                SDL_Color{
+                    248,
+                    248,
+                    248,
+                    255
+                };
+
+
+            panel =
+                SDL_Color{
+                    250,
+                    250,
+                    250,
+                    255
+                };
+
+
+            panelBright =
+                SDL_Color{
+                    232,
+                    232,
+                    232,
+                    255
+                };
+
+
+            panelSelected =
+                SDL_Color{
+                    255,
+                    214,
+                    216,
+                    255
+                };
+
+
+            border =
+                SDL_Color{
+                    24,
+                    24,
+                    24,
+                    255
+                };
+
+
+            accent =
+                SDL_Color{
+                    214,
+                    42,
+                    50,
+                    255
+                };
+
+
+            accentBright =
+                SDL_Color{
+                    239,
+                    70,
+                    77,
+                    255
+                };
+
+
+            blueAccent =
+                SDL_Color{
+                    176,
+                    28,
+                    36,
+                    255
+                };
+
+
+            // "white" is the app's main foreground text color.
+            // In Light mode it becomes black so existing screens
+            // remain readable without duplicating every draw call.
+            white =
+                SDL_Color{
+                    20,
+                    20,
+                    20,
+                    255
+                };
+
+
+            muted =
+                SDL_Color{
+                    76,
+                    76,
+                    76,
+                    255
+                };
+
+
+            darkText =
+                SDL_Color{
+                    20,
+                    20,
+                    20,
+                    255
+                };
+
+
+            red =
+                SDL_Color{
+                    205,
+                    35,
+                    43,
+                    255
+                };
+
+
+            green =
+                SDL_Color{
+                    20,
+                    20,
+                    20,
+                    255
+                };
+
+
+            orange =
+                SDL_Color{
+                    168,
+                    42,
+                    48,
+                    255
+                };
+
+
+            boardTop =
+                SDL_Color{
+                    232,
+                    55,
+                    63,
+                    255
+                };
+
+
+            boardBottom =
+                SDL_Color{
+                    248,
+                    248,
+                    248,
+                    255
+                };
+
+
+            cellColor =
+                SDL_Color{
+                    252,
+                    252,
+                    252,
+                    255
+                };
+
+
+            selectedCell =
+                SDL_Color{
+                    255,
+                    214,
+                    216,
+                    255
+                };
+        }
+
+        else
+        {
+            // Dark Great Ball / Super Ball inspired palette:
+            // deep navy / cobalt gradient + red accents.
+
+            nightTop =
+                SDL_Color{
+                    22,
+                    67,
+                    116,
+                    255
+                };
+
+
+            nightBottom =
+                SDL_Color{
+                    7,
+                    17,
+                    31,
+                    255
+                };
+
+
+            panel =
+                SDL_Color{
+                    17,
+                    27,
+                    41,
+                    255
+                };
+
+
+            panelBright =
+                SDL_Color{
+                    27,
+                    43,
+                    62,
+                    255
+                };
+
+
+            panelSelected =
+                SDL_Color{
+                    39,
+                    66,
+                    94,
+                    255
+                };
+
+
+            border =
+                SDL_Color{
+                    80,
+                    126,
+                    167,
+                    255
+                };
+
+
+            accent =
+                SDL_Color{
+                    211,
+                    56,
+                    68,
+                    255
+                };
+
+
+            accentBright =
+                SDL_Color{
+                    241,
+                    102,
+                    112,
+                    255
+                };
+
+
+            blueAccent =
+                SDL_Color{
+                    82,
+                    164,
+                    220,
+                    255
+                };
+
+
+            white =
+                SDL_Color{
+                    245,
+                    247,
+                    249,
+                    255
+                };
+
+
+            muted =
+                SDL_Color{
+                    173,
+                    188,
+                    202,
+                    255
+                };
+
+
+            darkText =
+                SDL_Color{
+                    14,
+                    20,
+                    28,
+                    255
+                };
+
+
+            red =
+                SDL_Color{
+                    229,
+                    79,
+                    89,
+                    255
+                };
+
+
+            green =
+                SDL_Color{
+                    88,
+                    198,
+                    132,
+                    255
+                };
+
+
+            orange =
+                SDL_Color{
+                    226,
+                    151,
+                    69,
+                    255
+                };
+
+
+            boardTop =
+                SDL_Color{
+                    25,
+                    73,
+                    123,
+                    255
+                };
+
+
+            boardBottom =
+                SDL_Color{
+                    10,
+                    25,
+                    43,
+                    255
+                };
+
+
+            cellColor =
+                SDL_Color{
+                    226,
+                    234,
+                    242,
+                    255
+                };
+
+
+            selectedCell =
+                SDL_Color{
+                    190,
+                    214,
+                    235,
+                    255
+                };
         }
 
 
@@ -7843,7 +10317,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "Pokemon grid puzzle for Nintendo Switch",
+                tr("Pokemon grid puzzle for Nintendo Switch", "Puzzle de Pokémon para Nintendo Switch"),
                 subtitleArea,
                 muted
             );
@@ -7900,7 +10374,7 @@ int main(
             drawTextCentered(
                 renderer,
                 bigFont,
-                "Unlimited Mode",
+                tr("Unlimited Mode", "Modo ilimitado"),
                 modeTitle,
                 white
             );
@@ -7918,7 +10392,7 @@ int main(
             drawTextCentered(
                 renderer,
                 font,
-                "A / Touch  Configure & Play",
+                tr("A / Touch  Configure & Play", "A / Táctil  Configurar y jugar"),
                 modeInfo,
                 blueAccent
             );
@@ -7939,7 +10413,7 @@ int main(
             std::snprintf(
                 databaseSummary,
                 sizeof(databaseSummary),
-                "%d categories  -  %d Pokemon and forms",
+                tr("%d categories  -  %d Pokemon and forms", "%d categorías  -  %d Pokémon y formas"),
                 CATEGORY_COUNT,
                 POKEMON_COUNT
             );
@@ -7966,7 +10440,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "+  Exit",
+                tr("+  Exit", "+  Salir"),
                 footer,
                 muted
             );
@@ -8011,7 +10485,7 @@ int main(
             drawTextCentered(
                 renderer,
                 bigFont,
-                "Unlimited Mode",
+                tr("Unlimited Mode", "Modo ilimitado"),
                 titleArea,
                 white
             );
@@ -8039,10 +10513,10 @@ int main(
 
             const char* optionNames[4] =
             {
-                "Unlimited PP",
-                "Soft Lock Guard",
-                "Allow Single Answers",
-                "Enable Timer"
+                tr("Unlimited PP", "PP ilimitados"),
+                tr("Soft Lock Guard", "Evitar bloqueo"),
+                tr("Allow Single Answers", "Permitir respuestas únicas"),
+                tr("Enable Timer", "Activar cronómetro")
             };
 
 
@@ -8124,6 +10598,18 @@ int main(
                 );
 
 
+                setColor(
+                    renderer,
+                    border
+                );
+
+
+                SDL_RenderDrawRect(
+                    renderer,
+                    &toggle
+                );
+
+
                 SDL_Rect knob =
                 {
                     optionValues[i]
@@ -8146,6 +10632,18 @@ int main(
                     renderer,
                     &knob
                 );
+
+
+                setColor(
+                    renderer,
+                    border
+                );
+
+
+                SDL_RenderDrawRect(
+                    renderer,
+                    &knob
+                );
             }
 
 
@@ -8156,7 +10654,7 @@ int main(
                 enabledText,
                 sizeof(enabledText),
 
-                "%d / %d categories enabled",
+                tr("%d / %d categories enabled", "%d / %d categorías activadas"),
 
                 getEnabledCategoryCount(
                     settings
@@ -8208,7 +10706,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "Settings are saved automatically",
+                tr("Settings are saved automatically", "Los ajustes se guardan automáticamente"),
                 savedArea,
                 green
             );
@@ -8293,9 +10791,9 @@ int main(
                     renderer,
                     smallFont,
 
-                    groupNames[
+                    localizedGroupName(
                         group
-                    ],
+                    ),
 
                     tab,
                     white
@@ -8326,12 +10824,14 @@ int main(
 
             setColor(
                 renderer,
-                SDL_Color{
-                    24,
-                    34,
-                    52,
-                    255
-                }
+                settings.lightTheme
+                    ? panelBright
+                    : SDL_Color{
+                        24,
+                        34,
+                        52,
+                        255
+                    }
             );
 
 
@@ -8396,7 +10896,7 @@ int main(
             drawText(
                 renderer,
                 smallFont,
-                "All",
+                tr("All", "Todo"),
                 allButton.x + 18,
                 allButton.y + 10,
                 white
@@ -8417,16 +10917,23 @@ int main(
 
                 allEnabled
                     ? accent
-                    : SDL_Color{
-                        67,
-                        79,
-                        99,
-                        255
-                    }
+                    : panelBright
             );
 
 
             SDL_RenderFillRect(
+                renderer,
+                &allToggle
+            );
+
+
+            setColor(
+                renderer,
+                border
+            );
+
+
+            SDL_RenderDrawRect(
                 renderer,
                 &allToggle
             );
@@ -8505,13 +11012,69 @@ int main(
                 }
 
 
+                const char* categoryLabel =
+                    localizedCategoryName(
+                        allCategories[
+                            categoryIndex
+                        ]
+                    );
+
+
+                // Keep the original 24 pt size in English. Spanish starts
+                // at 22 pt because its labels are generally longer. Both
+                // languages can still step down when a specific label needs it.
+                TTF_Font* categoryListFont =
+                    spanishLanguage
+                        ? compactFont
+                        : font;
+
+
+                int categoryLabelWidth = 0;
+                int categoryLabelHeight = 0;
+
+
+                const int categoryLabelMaxWidth =
+                    373;
+
+
+                if (
+                    TTF_SizeUTF8(
+                        categoryListFont,
+                        categoryLabel,
+                        &categoryLabelWidth,
+                        &categoryLabelHeight
+                    ) == 0
+                    &&
+                    categoryLabelWidth >
+                        categoryLabelMaxWidth
+                )
+                {
+                    categoryListFont =
+                        mediumFont;
+
+
+                    if (
+                        TTF_SizeUTF8(
+                            categoryListFont,
+                            categoryLabel,
+                            &categoryLabelWidth,
+                            &categoryLabelHeight
+                        ) == 0
+                        &&
+                        categoryLabelWidth >
+                            categoryLabelMaxWidth
+                    )
+                    {
+                        categoryListFont =
+                            smallFont;
+                    }
+                }
+
+
                 drawText(
                     renderer,
-                    font,
-
-                    allCategories[
-                        categoryIndex
-                    ].name,
+                    categoryListFont,
+                    categoryLabel,
 
                     categoryRow.x + 10,
                     categoryRow.y + 3,
@@ -8540,16 +11103,23 @@ int main(
                         categoryIndex
                     ]
                         ? accent
-                        : SDL_Color{
-                            73,
-                            83,
-                            101,
-                            255
-                        }
+                        : panelBright
                 );
 
 
                 SDL_RenderFillRect(
+                    renderer,
+                    &checkbox
+                );
+
+
+                setColor(
+                    renderer,
+                    border
+                );
+
+
+                SDL_RenderDrawRect(
                     renderer,
                     &checkbox
                 );
@@ -8567,7 +11137,9 @@ int main(
                         "x",
                         checkbox.x + 5,
                         checkbox.y - 2,
-                        darkText
+                        settings.lightTheme
+                            ? white
+                            : darkText
                     );
                 }
             }
@@ -8576,7 +11148,7 @@ int main(
             drawText(
                 renderer,
                 smallFont,
-                "Swipe to scroll",
+                tr("Swipe to scroll", "Desliza para desplazarte"),
                 690,
                 397,
                 muted
@@ -8610,12 +11182,7 @@ int main(
 
             setColor(
                 renderer,
-                SDL_Color{
-                    255,
-                    177,
-                    185,
-                    255
-                }
+                accentBright
             );
 
 
@@ -8628,7 +11195,7 @@ int main(
             drawTextCentered(
                 renderer,
                 font,
-                "X  Generate",
+                tr("X  Generate", "X  Generar"),
                 generateButton,
                 white
             );
@@ -8661,7 +11228,7 @@ int main(
                 renderer,
                 smallFont,
 
-                "A Toggle     Y All     X Generate     B Back     Touch supported",
+                tr("A Toggle     Y All     X Generate     B Back     Touch supported", "A Cambiar     Y Todo     X Generar     B Volver     Táctil"),
 
                 90,
                 660,
@@ -8685,7 +11252,7 @@ int main(
 
 
             const int gridX =
-                590;
+                570;
 
 
             const int gridY =
@@ -8740,7 +11307,7 @@ int main(
             drawText(
                 renderer,
                 smallFont,
-                "UNLIMITED MODE",
+                tr("UNLIMITED MODE", "MODO ILIMITADO"),
                 42,
                 58,
                 blueAccent
@@ -8778,7 +11345,7 @@ int main(
                     mistakesText,
                     sizeof(mistakesText),
 
-                    "Mistakes: %d  Unlimited",
+                    tr("Mistakes: %d  Unlimited", "Errores: %d  Ilimitados"),
 
                     game.mistakes
                 );
@@ -8790,7 +11357,7 @@ int main(
                     mistakesText,
                     sizeof(mistakesText),
 
-                    "Mistakes: %d / %d",
+                    tr("Mistakes: %d / %d", "Errores: %d / %d"),
 
                     game.mistakes,
                     MAX_MISTAKES
@@ -8818,7 +11385,7 @@ int main(
                 correctText,
                 sizeof(correctText),
 
-                "Correct: %d / 9",
+                tr("Correct: %d / 9", "Aciertos: %d / 9"),
 
                 game.correctAnswers
             );
@@ -8868,7 +11435,7 @@ int main(
                 std::snprintf(
                     fullTimer,
                     sizeof(fullTimer),
-                    "Time: %s",
+                    tr("Time: %s", "Tiempo: %s"),
                     timer
                 );
 
@@ -8900,12 +11467,19 @@ int main(
                 drawCard(
                     renderer,
                     wrongArea,
-                    SDL_Color{
-                        72,
-                        39,
-                        48,
-                        255
-                    },
+                    settings.lightTheme
+                        ? SDL_Color{
+                            255,
+                            224,
+                            226,
+                            255
+                        }
+                        : SDL_Color{
+                            72,
+                            39,
+                            48,
+                            255
+                        },
                     red,
                     3
                 );
@@ -8914,7 +11488,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    "Wrong!",
+                    tr("Wrong!", "¡Incorrecto!"),
                     SDL_Rect{
                         24,
                         250,
@@ -8928,7 +11502,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    "Blocked for this cell",
+                    tr("Blocked for this cell", "Bloqueado en esta casilla"),
                     SDL_Rect{
                         24,
                         278,
@@ -8940,28 +11514,39 @@ int main(
             }
 
 
+            // Spanish uses the corrected 22 pt starting size. English keeps
+            // the original 24 pt size unless a title must shrink to preserve
+            // the fixed minimum padding from the card borders.
+            TTF_Font* primaryHeaderFont =
+                spanishLanguage
+                    ? compactFont
+                    : font;
+
+
             TTF_Font* columnHeaderFont =
                 chooseColumnHeaderFont(
-                    font,
+                    primaryHeaderFont,
                     mediumFont,
                     smallFont,
 
                     game.columns,
 
-                    cellSize - 16,
-                    80
+                    cellSize -
+                        HEADER_HORIZONTAL_PADDING * 2,
+                    90
                 );
 
 
             TTF_Font* rowHeaderFont =
                 chooseAxisHeaderFont(
-                    font,
+                    primaryHeaderFont,
                     mediumFont,
                     smallFont,
 
                     game.rows,
 
-                    280 - 24,
+                    280 -
+                        HEADER_HORIZONTAL_PADDING * 2,
                     cellSize
                 );
 
@@ -8980,11 +11565,11 @@ int main(
                     column *
                     cellSize,
 
-                    gridY - 95,
+                    gridY - 110,
 
                     cellSize,
 
-                    80
+                    90
                 };
 
 
@@ -9001,9 +11586,11 @@ int main(
                     renderer,
                     columnHeaderFont,
 
-                    game.columns[
-                        column
-                    ].name,
+                    localizedCategoryName(
+                        game.columns[
+                            column
+                        ]
+                    ),
 
                     header,
                     white
@@ -9045,9 +11632,11 @@ int main(
                     renderer,
                     rowHeaderFont,
 
-                    game.rows[
-                        row
-                    ].name,
+                    localizedCategoryName(
+                        game.rows[
+                            row
+                        ]
+                    ),
 
                     header,
                     white
@@ -9108,12 +11697,14 @@ int main(
 
                     setColor(
                         renderer,
-                        SDL_Color{
-                            86,
-                            105,
-                            134,
-                            255
-                        }
+                        settings.lightTheme
+                            ? border
+                            : SDL_Color{
+                                86,
+                                105,
+                                134,
+                                255
+                            }
                     );
 
 
@@ -9188,12 +11779,19 @@ int main(
 
                         setColor(
                             renderer,
-                            SDL_Color{
-                                29,
-                                40,
-                                59,
-                                230
-                            }
+                            settings.lightTheme
+                                ? SDL_Color{
+                                    238,
+                                    238,
+                                    238,
+                                    238
+                                }
+                                : SDL_Color{
+                                    29,
+                                    40,
+                                    59,
+                                    230
+                                }
                         );
 
 
@@ -9217,13 +11815,13 @@ int main(
                         };
 
 
-                        drawTextCentered(
+                        drawTextCenteredFit(
                             renderer,
                             smallFont,
 
-                            pokemonData[
+                            localizedPokemonName(
                                 pokemonIndex
-                            ].name,
+                            ),
 
                             nameArea,
                             white
@@ -9235,7 +11833,7 @@ int main(
 
             SDL_Rect newPuzzleButton =
             {
-                260,
+                270,
                 662,
                 185,
                 42
@@ -9290,7 +11888,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "X  New Puzzle",
+                tr("X  New Puzzle", "X  Nuevo puzzle"),
                 newPuzzleButton,
                 white
             );
@@ -9299,28 +11897,44 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "Y  Settings",
+                tr("Y  Settings", "Y  Ajustes"),
                 settingsButton,
                 white
             );
 
 
-            drawText(
+            SDL_Rect selectLabel =
+            {
+                20,
+                662,
+                150,
+                42
+            };
+
+
+            SDL_Rect exitLabel =
+            {
+                1095,
+                662,
+                150,
+                42
+            };
+
+
+            drawTextCentered(
                 renderer,
                 smallFont,
-                "A Select",
-                35,
-                672,
+                tr("A Select", "A Seleccionar"),
+                selectLabel,
                 muted
             );
 
 
-            drawText(
+            drawTextCentered(
                 renderer,
                 smallFont,
-                "+ Exit",
-                1160,
-                672,
+                tr("+ Exit", "+ Salir"),
+                exitLabel,
                 muted
             );
 
@@ -9360,9 +11974,9 @@ int main(
                 SDL_Rect selector =
                 {
                     250,
-                    20,
+                    14,
                     780,
-                    680
+                    692
                 };
 
 
@@ -9395,7 +12009,7 @@ int main(
                 SDL_Rect closeButton =
                 {
                     974,
-                    28,
+                    22,
                     38,
                     38
                 };
@@ -9403,12 +12017,7 @@ int main(
 
                 setColor(
                     renderer,
-                    SDL_Color{
-                        67,
-                        79,
-                        99,
-                        255
-                    }
+                    panelBright
                 );
 
 
@@ -9430,7 +12039,7 @@ int main(
                 SDL_Rect title =
                 {
                     280,
-                    32,
+                    26,
                     680,
                     35
                 };
@@ -9439,7 +12048,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     font,
-                    "SELECT POKEMON",
+                    tr("SELECT POKEMON", "SELECCIONAR POKÉMON"),
                     title,
                     white
                 );
@@ -9454,20 +12063,24 @@ int main(
 
                     "%s  /  %s",
 
-                    game.rows[
-                        game.selectedRow
-                    ].name,
+                    localizedCategoryName(
+                        game.rows[
+                            game.selectedRow
+                        ]
+                    ),
 
-                    game.columns[
-                        game.selectedColumn
-                    ].name
+                    localizedCategoryName(
+                        game.columns[
+                            game.selectedColumn
+                        ]
+                    )
                 );
 
 
                 SDL_Rect categoryArea =
                 {
                     280,
-                    67,
+                    61,
                     720,
                     25
                 };
@@ -9504,7 +12117,7 @@ int main(
                 SDL_Rect infoArea =
                 {
                     280,
-                    94,
+                    88,
                     720,
                     22
                 };
@@ -9520,15 +12133,15 @@ int main(
 
 
                 const int visibleRows =
-                    7;
+                    SELECTOR_VISIBLE_ROWS;
 
 
                 const int rowSpacing =
-                    61;
+                    SELECTOR_ROW_SPACING;
 
 
                 const int spriteSize =
-                    54;
+                    SELECTOR_SPRITE_SIZE;
 
 
                 for (
@@ -9537,16 +12150,10 @@ int main(
                     i++
                 )
                 {
-                    int offset =
-                        i -
-                        visibleRows /
-                        2;
-
-
                     int pokemonIndex =
-                        getPokemonSearchResultAtOffset(
+                        getPokemonSelectorVisibleAtRow(
                             game.selectedPokemon,
-                            offset
+                            i
                         );
 
 
@@ -9574,13 +12181,13 @@ int main(
                     {
                         300,
 
-                        120 +
+                        SELECTOR_LIST_Y +
                         i *
                         rowSpacing,
 
                         680,
 
-                        58
+                        SELECTOR_ROW_HEIGHT
                     };
 
 
@@ -9591,27 +12198,42 @@ int main(
                     if (used)
                     {
                         rowColor =
-                            SDL_Color{
-                                47,
-                                50,
-                                58,
-                                255
-                            };
+                            settings.lightTheme
+                                ? SDL_Color{
+                                    218,
+                                    218,
+                                    218,
+                                    255
+                                }
+                                : SDL_Color{
+                                    47,
+                                    50,
+                                    58,
+                                    255
+                                };
                     }
 
                     else if (tried)
                     {
                         rowColor =
-                            SDL_Color{
-                                70,
-                                47,
-                                49,
-                                255
-                            };
+                            settings.lightTheme
+                                ? SDL_Color{
+                                    255,
+                                    222,
+                                    224,
+                                    255
+                                }
+                                : SDL_Color{
+                                    70,
+                                    47,
+                                    49,
+                                    255
+                                };
                     }
 
                     else if (
-                        offset == 0
+                        pokemonIndex ==
+                        game.selectedPokemon
                     )
                     {
                         rowColor =
@@ -9647,7 +12269,7 @@ int main(
                         renderer,
                         pokemonIndex,
 
-                        pokemonRow.x + 8,
+                        pokemonRow.x + 5,
                         pokemonRow.y + 2,
 
                         spriteSize,
@@ -9663,20 +12285,20 @@ int main(
 
                     SDL_Rect nameArea =
                     {
-                        pokemonRow.x + 72,
+                        pokemonRow.x + 82,
                         pokemonRow.y,
-                        445,
+                        437,
                         pokemonRow.h
                     };
 
 
-                    drawTextCentered(
+                    drawTextCenteredFit(
                         renderer,
                         font,
 
-                        pokemonData[
+                        localizedPokemonName(
                             pokemonIndex
-                        ].name,
+                        ),
 
                         nameArea,
 
@@ -9692,9 +12314,9 @@ int main(
                     SDL_Rect selectButton =
                     {
                         pokemonRow.x + 555,
-                        pokemonRow.y + 10,
+                        pokemonRow.y + 15,
                         105,
-                        38
+                        42
                     };
 
 
@@ -9703,7 +12325,7 @@ int main(
                         drawTextCentered(
                             renderer,
                             smallFont,
-                            "USED",
+                            tr("USED", "USADO"),
                             selectButton,
                             red
                         );
@@ -9714,7 +12336,7 @@ int main(
                         drawTextCentered(
                             renderer,
                             smallFont,
-                            "TRIED",
+                            tr("TRIED", "PROBADO"),
                             selectButton,
                             orange
                         );
@@ -9737,7 +12359,7 @@ int main(
                         drawTextCentered(
                             renderer,
                             smallFont,
-                            "SELECT",
+                            tr("SELECT", "ELEGIR"),
                             selectButton,
                             white
                         );
@@ -9775,7 +12397,7 @@ int main(
                             searchText,
                             sizeof(searchText),
 
-                            "Filter: \"%s\"   %d/%d   |   D-Pad Results   |   ZR Search",
+                            tr("Filter: \"%s\"   %d/%d   |   D-Pad Results   |   ZR Search", "Filtro: \"%s\"   %d/%d   |   Cruceta Resultados   |   ZR Buscar"),
 
                             pokemonSearchQuery,
 
@@ -9791,7 +12413,7 @@ int main(
                             searchText,
                             sizeof(searchText),
 
-                            "Filter: \"%s\"   No matches   |   ZR Search",
+                            tr("Filter: \"%s\"   No matches   |   ZR Search", "Filtro: \"%s\"   Sin resultados   |   ZR Buscar"),
 
                             pokemonSearchQuery
                         );
@@ -9801,9 +12423,9 @@ int main(
                     SDL_Rect searchArea =
                     {
                         275,
-                        548,
+                        621,
                         730,
-                        30
+                        26
                     };
 
 
@@ -9824,48 +12446,29 @@ int main(
                     SDL_Rect searchArea =
                     {
                         275,
-                        548,
+                        621,
                         730,
-                        30
+                        26
                     };
 
 
                     drawTextCentered(
                         renderer,
                         smallFont,
-                        "ZR Search by name or jump to Pokedex number",
+                        tr("ZR Search by name or jump to Pokedex number", "ZR Buscar por nombre o ir al número de Pokédex"),
                         searchArea,
                         blueAccent
                     );
                 }
 
 
-                SDL_Rect swipeHint =
-                {
-                    280,
-                    580,
-                    720,
-                    30
-                };
-
-
-                drawTextCentered(
-                    renderer,
-                    smallFont,
-
-                    "Touch: tap to focus - SELECT to confirm - swipe to scroll",
-
-                    swipeHint,
-                    muted
-                );
-
 
                 drawText(
                     renderer,
                     smallFont,
-                    "A Select",
+                    tr("A Select", "A Seleccionar"),
                     285,
-                    655,
+                    663,
                     muted
                 );
 
@@ -9873,9 +12476,9 @@ int main(
                 drawText(
                     renderer,
                     smallFont,
-                    "L/R Jump 10",
+                    tr("L/R Jump 7", "L/R Saltar 7"),
                     465,
-                    655,
+                    663,
                     muted
                 );
 
@@ -9883,9 +12486,9 @@ int main(
                 drawText(
                     renderer,
                     smallFont,
-                    "ZL Result",
+                    tr("ZL Result", "ZL Resultado"),
                     650,
-                    655,
+                    663,
                     muted
                 );
 
@@ -9893,9 +12496,9 @@ int main(
                 drawText(
                     renderer,
                     smallFont,
-                    "ZR Search",
+                    tr("ZR Search", "ZR Buscar"),
                     785,
-                    655,
+                    663,
                     blueAccent
                 );
 
@@ -9903,9 +12506,9 @@ int main(
                 drawText(
                     renderer,
                     smallFont,
-                    "B Back",
+                    tr("B Back", "B Volver"),
                     920,
-                    655,
+                    663,
                     muted
                 );
             }
@@ -9978,9 +12581,9 @@ int main(
 
                     game.gameWon
                         ?
-                        "PUZZLE COMPLETE!"
+                        tr("PUZZLE COMPLETE!", "¡PUZZLE COMPLETADO!")
                         :
-                        "GAME OVER",
+                        tr("GAME OVER", "FIN DE LA PARTIDA"),
 
                     resultTitle,
 
@@ -9997,7 +12600,7 @@ int main(
                     resultText,
                     sizeof(resultText),
 
-                    "%d correct  -  %d mistakes",
+                    tr("%d correct  -  %d mistakes", "%d aciertos  -  %d errores"),
 
                     game.correctAnswers,
                     game.mistakes
@@ -10043,7 +12646,7 @@ int main(
                         resultTimer,
                         sizeof(resultTimer),
 
-                        "Time: %s",
+                        tr("Time: %s", "Tiempo: %s"),
 
                         timer
                     );
@@ -10071,7 +12674,7 @@ int main(
                 SDL_Rect newPuzzleButton =
                 {
                     405,
-                    405,
+                    390,
                     205,
                     55
                 };
@@ -10080,7 +12683,7 @@ int main(
                 SDL_Rect settingsButton =
                 {
                     670,
-                    405,
+                    390,
                     205,
                     55
                 };
@@ -10113,7 +12716,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    "X  New Puzzle",
+                    tr("X  New Puzzle", "X  Nuevo puzzle"),
                     newPuzzleButton,
                     white
                 );
@@ -10122,7 +12725,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    "Y  Settings",
+                    tr("Y  Settings", "Y  Ajustes"),
                     settingsButton,
                     white
                 );
@@ -10164,7 +12767,7 @@ int main(
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    "B  View completed grid",
+                    tr("B  View completed grid", "B  Ver cuadrícula completada"),
                     viewGridButton,
                     white
                 );
@@ -10172,10 +12775,225 @@ int main(
         }
 
 
+        // ====================================================
+        // QUICK SETTINGS HINT / OVERLAY
+        // ====================================================
+
         if (
-            screen ==
-                SCREEN_GAME
+            !quickMenuOpen
             &&
+            confirmAction ==
+                CONFIRM_NONE
+        )
+        {
+            SDL_Rect quickHint =
+            {
+                1094,
+                18,
+                172,
+                36
+            };
+
+
+            drawCard(
+                renderer,
+                quickHint,
+                panel,
+                border,
+                2
+            );
+
+
+            drawTextCentered(
+                renderer,
+                smallFont,
+                tr("-  Quick Settings", "-  Ajustes rápidos"),
+                quickHint,
+                muted
+            );
+        }
+
+
+        if (
+            quickMenuOpen
+        )
+        {
+            SDL_Rect quickPanel =
+            {
+                870,
+                18,
+                392,
+                340
+            };
+
+
+            drawCard(
+                renderer,
+                quickPanel,
+                panel,
+                border,
+                7
+            );
+
+
+            SDL_Rect quickAccent =
+            {
+                quickPanel.x,
+                quickPanel.y,
+                7,
+                quickPanel.h
+            };
+
+
+            setColor(
+                renderer,
+                accent
+            );
+
+
+            SDL_RenderFillRect(
+                renderer,
+                &quickAccent
+            );
+
+
+            SDL_Rect quickTitle =
+            {
+                quickPanel.x + 18,
+                quickPanel.y + 22,
+                quickPanel.w - 36,
+                44
+            };
+
+
+            drawTextCentered(
+                renderer,
+                font,
+                tr("QUICK SETTINGS", "AJUSTES RÁPIDOS"),
+                quickTitle,
+                white
+            );
+
+
+            SDL_Rect rows[3] =
+            {
+                {quickPanel.x + 20, quickPanel.y + 90, quickPanel.w - 40, 58},
+                {quickPanel.x + 20, quickPanel.y + 160, quickPanel.w - 40, 58},
+                {quickPanel.x + 20, quickPanel.y + 230, quickPanel.w - 40, 58}
+            };
+
+
+            const char* labels[3] =
+            {
+                tr("Theme", "Tema"),
+                tr("Music", "Música"),
+                tr("SFX", "Efectos")
+            };
+
+
+            const char* values[3] =
+            {
+                settings.lightTheme
+                    ? tr("Light", "Claro")
+                    : tr("Dark", "Oscuro"),
+
+                settings.musicEnabled
+                    ? tr("On", "Sí")
+                    : tr("Off", "No"),
+
+                settings.sfxEnabled
+                    ? tr("On", "Sí")
+                    : tr("Off", "No")
+            };
+
+
+            for (
+                int row = 0;
+                row < 3;
+                row++
+            )
+            {
+                drawCard(
+                    renderer,
+                    rows[row],
+
+                    row ==
+                    quickMenuSelection
+                        ? panelSelected
+                        : panelBright,
+
+                    row ==
+                    quickMenuSelection
+                        ? accentBright
+                        : border,
+
+                    3
+                );
+
+
+                drawText(
+                    renderer,
+                    smallFont,
+                    labels[row],
+                    rows[row].x + 18,
+                    rows[row].y + 18,
+                    white
+                );
+
+
+                int valueWidth = 0;
+                int valueHeight = 0;
+
+
+                TTF_SizeUTF8(
+                    smallFont,
+                    values[row],
+                    &valueWidth,
+                    &valueHeight
+                );
+
+
+                drawText(
+                    renderer,
+                    smallFont,
+                    values[row],
+                    rows[row].x +
+                        rows[row].w -
+                        valueWidth -
+                        22,
+                    rows[row].y +
+                        (
+                            rows[row].h -
+                            valueHeight
+                        ) / 2,
+                    row ==
+                    quickMenuSelection
+                        ? accentBright
+                        : muted
+                );
+            }
+
+
+            SDL_Rect closeHint =
+            {
+                quickPanel.x + 18,
+                quickPanel.y + quickPanel.h - 34,
+                quickPanel.w - 36,
+                24
+            };
+
+
+            drawTextCentered(
+                renderer,
+                smallFont,
+                tr("A / Touch  Change    B / -  Close", "A / Táctil  Cambiar    B / -  Cerrar"),
+                closeHint,
+                muted
+            );
+        }
+
+
+        if (
             confirmAction !=
                 CONFIRM_NONE
         )
@@ -10208,8 +13026,8 @@ int main(
 
             SDL_Rect confirmPanel =
             {
-                340,
-                255,
+                (SCREEN_WIDTH - 600) / 2,
+                (SCREEN_HEIGHT - 280) / 2,
                 600,
                 280
             };
@@ -10242,10 +13060,10 @@ int main(
             )
             {
                 confirmTitle =
-                    "START NEW PUZZLE?";
+                    tr("START NEW PUZZLE?", "¿NUEVO PUZZLE?");
 
                 confirmLine1 =
-                    "Current progress will be lost.";
+                    tr("Current progress will be lost.", "Se perderá el progreso actual.");
             }
 
             else if (
@@ -10254,13 +13072,13 @@ int main(
             )
             {
                 confirmTitle =
-                    "OPEN SETTINGS?";
+                    tr("OPEN SETTINGS?", "¿ABRIR AJUSTES?");
 
                 confirmLine1 =
-                    "Your current puzzle will be kept.";
+                    tr("Your current puzzle will be kept.", "Se conservará el puzzle actual.");
 
                 confirmLine2 =
-                    "Changes apply to the next puzzle.";
+                    tr("Changes apply to the next puzzle.", "Los cambios se aplicarán al próximo puzzle.");
             }
 
             else if (
@@ -10269,19 +13087,19 @@ int main(
             )
             {
                 confirmTitle =
-                    "EXIT POKEDOKU-NX?";
+                    tr("EXIT POKEDOKU-NX?", "¿SALIR DE POKEDOKU-NX?");
 
                 confirmLine1 =
-                    "Current progress will be lost.";
+                    tr("Are you sure you want to exit?", "¿Seguro que quieres salir?");
             }
 
 
             SDL_Rect confirmTitleArea =
             {
                 confirmPanel.x + 25,
-                confirmPanel.y + 30,
+                confirmPanel.y + 34,
                 confirmPanel.w - 50,
-                45
+                50
             };
 
 
@@ -10297,9 +13115,11 @@ int main(
             SDL_Rect confirmLineArea =
             {
                 confirmPanel.x + 25,
-                confirmPanel.y + 96,
+                confirmLine2[0] != '\0'
+                    ? confirmPanel.y + 102
+                    : confirmPanel.y + 118,
                 confirmPanel.w - 50,
-                32
+                36
             };
 
 
@@ -10320,7 +13140,7 @@ int main(
                 SDL_Rect confirmLine2Area =
                 {
                     confirmPanel.x + 25,
-                    confirmPanel.y + 126,
+                    confirmPanel.y + 138,
                     confirmPanel.w - 50,
                     32
                 };
@@ -10339,7 +13159,7 @@ int main(
             SDL_Rect confirmButton =
             {
                 455,
-                454,
+                414,
                 175,
                 52
             };
@@ -10348,7 +13168,7 @@ int main(
             SDL_Rect cancelButton =
             {
                 650,
-                454,
+                414,
                 175,
                 52
             };
@@ -10375,7 +13195,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "A  Confirm",
+                tr("A  Confirm", "A  Confirmar"),
                 confirmButton,
                 white
             );
@@ -10384,7 +13204,7 @@ int main(
             drawTextCentered(
                 renderer,
                 smallFont,
-                "B  Cancel",
+                tr("B  Cancel", "B  Cancelar"),
                 cancelButton,
                 white
             );
@@ -10478,6 +13298,11 @@ int main(
 
 
     TTF_CloseFont(
+        compactFont
+    );
+
+
+    TTF_CloseFont(
         mediumFont
     );
 
@@ -10488,6 +13313,8 @@ int main(
 
 
     plExit();
+
+    shutdownGameAudio();
 
     TTF_Quit();
     IMG_Quit();
