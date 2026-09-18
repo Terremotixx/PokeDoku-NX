@@ -1,12 +1,14 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$Version = "1.1.0"
+$Version = "1.2.0"
 $App = "PokeDoku-NX"
 $Nro = "$App.nro"
+$MusicDir = "music"
 $ReleaseRoot = "release"
 $ReleaseName = "$App-v$Version"
 $ReleaseDir = Join-Path $ReleaseRoot $ReleaseName
 $InstallDir = Join-Path $ReleaseDir "switch\$App"
+$InstallMusicDir = Join-Path $InstallDir "music"
 $Zip = Join-Path $ReleaseRoot "$ReleaseName.zip"
 
 if (-not (Test-Path $Nro)) {
@@ -25,6 +27,15 @@ if (Test-Path $Zip) {
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Copy-Item $Nro (Join-Path $InstallDir $Nro)
+
+if (Test-Path $MusicDir) {
+    New-Item -ItemType Directory -Force -Path $InstallMusicDir | Out-Null
+    Copy-Item (Join-Path $MusicDir "*") $InstallMusicDir -Recurse -Force
+    Write-Host "Included music folder in release package."
+}
+else {
+    Write-Host "WARNING: music folder not found. Release ZIP will not include default music."
+}
 
 if (Test-Path "README.md") {
     Copy-Item "README.md" (Join-Path $ReleaseDir "README.md")
