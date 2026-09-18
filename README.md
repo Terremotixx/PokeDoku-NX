@@ -4,7 +4,7 @@ A native Nintendo Switch homebrew implementation inspired by **PokeDoku**, built
 
 PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories and lets you solve them directly on Nintendo Switch using buttons, sticks or the touchscreen.
 
-> **Unofficial fan project.** PokeDoku-NX is not affiliated with Nintendo, Game Freak, The Pokémon Company, or the official PokeDoku website.
+> **Unofficial fan project.** PokeDoku-NX is not affiliated with Nintendo, Game Freak, The Pokémon Company, Creatures Inc., or the official PokeDoku website.
 
 ## Features
 
@@ -16,8 +16,11 @@ PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories 
 - Mega Evolutions
 - Gigantamax forms
 - Regional Forms from Alola, Galar, Hisui and Paldea
+- **English and Spanish interface** with automatic Switch system-language detection
+- Spanish localization for categories, interface text and Pokémon/form names
+- Search by localized Spanish name, with English aliases also accepted while using Spanish
 - Touchscreen support
-- Pokémon sprites displayed directly on the completed grid, with improved centering and sizing
+- Pokémon sprites displayed directly on the completed grid
 - Persistent settings saved to the SD card
 - Optional timer
 - Unlimited PP mode
@@ -26,6 +29,12 @@ PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories 
 - Searchable Pokémon selector
 - Name filtering
 - Direct National Pokédex number jump
+- Selector starts at **Bulbasaur** when opened normally
+- **7 visible Pokémon per page** with 68×68 sprites
+- Accelerating navigation while holding the D-Pad, stick or L/R
+- Sound effects
+- Optional background music with shuffle playback
+- Custom `.ogg` and `.mp3` music support from the SD card
 - Confirmation prompts during active puzzles for New Puzzle, Settings and Exit
 - Settings opened mid-puzzle preserve the current board; changed settings apply to the next puzzle
 - After completing a puzzle, press **B** on the result screen to view the completed grid
@@ -46,6 +55,8 @@ PokeDoku-NX currently contains **76 categories**:
 ### Regions
 
 Kanto, Johto, Hoenn, Sinnoh, Unova, Kalos, Alola, Galar, Hisui and Paldea.
+
+In Spanish, Unova is displayed as **Teselia**.
 
 ### Other
 
@@ -75,8 +86,8 @@ Baby, Dual Type, First Partner, Fossil, Gmax, Legendary, Mega, Monotype, Mythica
 
 ### Pokémon selector
 
-- **D-Pad / Left Stick** — Move through Pokémon
-- **L / R** — Jump by 10
+- **D-Pad / Left Stick** — Move through Pokémon; holding accelerates scrolling
+- **L / R** — Jump by 7; holding accelerates page scrolling
 - **ZR** — Open search
 - **ZL** — Next matching search result
 - **A** — Submit selected Pokémon
@@ -85,18 +96,25 @@ Baby, Dual Type, First Partner, Fossil, Gmax, Legendary, Mega, Monotype, Mythica
 
 Search behavior:
 
-- Searching by **name** filters the list. Example: `sw` shows matching names such as Swampert, Swellow, Swablu, etc.
-- Searching by **National Pokédex number** jumps directly to that species without filtering the list. Example: `260` jumps to Swampert and you can continue scrolling normally to #259, #261, and so on.
+- Searching by **name** filters the list.
+- Searching by **National Pokédex number** jumps directly to that species without filtering the list. Example: `260` jumps to Swampert and you can continue scrolling normally around that entry.
+- When the app is in **Spanish**, localized Spanish names are displayed and both Spanish names and English aliases can be used for name searches. For example, `Colmilargo` and `Great Tusk` can both find the same Pokémon while the interface remains Spanish.
+- When the app is in **English**, search uses English names.
 
 ## Installation
 
-1. Copy `PokeDoku-NX.nro` to:
+Extract the release ZIP to the root of the SD card. The final structure should look like:
 
-   ```text
-   /switch/PokeDoku-NX/PokeDoku-NX.nro
-   ```
+```text
+/switch/PokeDoku-NX/
+├── PokeDoku-NX.nro
+└── music/
+    ├── track01.ogg
+    ├── track02.ogg
+    └── ...
+```
 
-2. Launch it from the Homebrew Menu.
+Then launch **PokeDoku-NX** from the Homebrew Menu.
 
 Settings are automatically stored at:
 
@@ -104,7 +122,32 @@ Settings are automatically stored at:
 /switch/PokeDoku-NX/settings.ini
 ```
 
-The Pokémon sprites are packed into the NRO through RomFS, so no external sprite folder is required for a normal release build.
+The Pokémon sprites and sound effects are packed into the NRO through RomFS, so no external sprite or SFX folder is required for a normal release build.
+
+## Music
+
+PokeDoku-NX v1.2.0 supports background music stored at:
+
+```text
+/switch/PokeDoku-NX/music/
+```
+
+Supported formats:
+
+- `.ogg`
+- `.mp3`
+
+The release package can include a default music collection, but the folder is fully customizable:
+
+- Add your own OGG or MP3 files alongside the included tracks.
+- Delete individual default tracks if you do not want them.
+- Delete all default tracks and use only your own music.
+- Leave the folder empty to play without background music.
+- Restart PokeDoku-NX after changing the contents of the music folder so the playlist is scanned again.
+
+Tracks are played in a shuffled bag: each discovered track is played once before the playlist is reshuffled. The app attempts to avoid immediately repeating the same track at a shuffle boundary.
+
+Background music can be enabled or disabled from **Settings**. Sound effects remain separate from the Music setting.
 
 ## Building
 
@@ -116,12 +159,17 @@ The Pokémon sprites are packed into the NRO through RomFS, so no external sprit
 - SDL2
 - SDL2_image
 - SDL2_ttf
+- **SDL2_mixer**
 - switch-freetype
 - switch-harfbuzz
 - switch-zlib
 - switch-libpng
 - switch-bzip2
 - switch-libwebp
+- switch-libogg
+- switch-libvorbisidec
+- switch-libopus / switch-opusfile
+- switch-mpg123
 - Python 3, if regenerating the Pokémon databases
 
 With the dependencies installed:
@@ -135,6 +183,12 @@ The resulting file is:
 
 ```text
 PokeDoku-NX.nro
+```
+
+If `pkg-config` cannot locate the Switch portlibs, use:
+
+```bash
+export PKG_CONFIG_PATH=/opt/devkitpro/portlibs/switch/lib/pkgconfig:/opt/devkitpro/portlibs/switch/share/pkgconfig
 ```
 
 ## Regenerating Pokémon data
@@ -166,17 +220,18 @@ Total entries:   1213
 - **PokéAPI** — Pokémon data used by the project: https://pokeapi.co/
 - **PokéAPI sprites repository** — source for the standard Pokémon sprites: https://github.com/PokeAPI/sprites
 - **Mega Zygarde custom sprite** — source post by `@kingofthexroad5`: https://x.com/kingofthexroad5/status/1979702959933157509
+- **@CinderyLofi** — arrangements/recordings used in the optional default music collection; credited according to the creator's stated usage terms
 - **devkitPro / devkitA64 / libnx** — Nintendo Switch homebrew toolchain
-- **SDL2, SDL2_image and SDL2_ttf** — rendering, image loading and font support
+- **SDL2, SDL2_image, SDL2_ttf and SDL2_mixer** — rendering, image/font loading and audio playback
 
 ## Disclaimer
 
-Pokémon and all related names, characters and imagery are trademarks and/or copyrighted material of their respective owners.
+Pokémon and all related names, characters, imagery and music compositions are trademarks and/or copyrighted material of their respective owners.
 
 PokeDoku-NX is a non-commercial fan-made homebrew project created for educational and entertainment purposes. It is not endorsed by or affiliated with Nintendo, Game Freak, The Pokémon Company, Creatures Inc., or PokeDoku.
 
 ## Version
 
-**PokeDoku-NX v1.1.0**
+**PokeDoku-NX v1.2.0**
 
 Author: **Terremotixx**
