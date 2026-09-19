@@ -175,15 +175,83 @@ static Mix_Chunk* sfxChunks[SFX_COUNT] = {};
 
 static bool mixerAudioReady = false;
 
-static Mix_Music* currentMusic = nullptr;
+// Background music uses two dedicated SDL_mixer channels instead of
+// Mix_Music. This lets us preload the next compressed track and overlap
+// the transition very slightly, avoiding an audible gap between songs.
+const int MUSIC_CHANNEL_A = 14;
+const int MUSIC_CHANNEL_B = 15;
+const int MUSIC_VOLUME = 20;
+const Uint32 MUSIC_CROSSFADE_MS = 90;
+
+static Mix_Chunk* currentMusicChunk = nullptr;
+static Mix_Chunk* queuedMusicChunk = nullptr;
+static Mix_Chunk* retiredMusicChunk = nullptr;
+
+static int currentMusicChannel = MUSIC_CHANNEL_A;
+static int retiredMusicChannel = -1;
+
+static Uint32 currentMusicStartedAt = 0;
+static Uint32 currentMusicDurationMs = 0;
+static Uint32 queuedMusicDurationMs = 0;
+static Uint32 musicPauseStartedAt = 0;
+
+static bool musicPausedBySetting = false;
 
 static std::vector<std::string> musicTracks;
 static std::vector<int> musicShuffleOrder;
 
 static int musicShufflePosition = 0;
+static int currentMusicTrackIndex = -1;
+static int queuedMusicTrackIndex = -1;
 static int lastMusicTrackIndex = -1;
 
 static bool musicPlaybackBroken = false;
+
+
+// Final master boost applied after SDL_mixer combines music and SFX.
+// This raises the complete output by 25% while preserving the balance
+// between background music and UI effects. Samples are clamped to the
+// valid signed 16-bit range to avoid integer overflow.
+const int MASTER_OUTPUT_GAIN_PERCENT = 130;
+
+
+void boostMixedAudio(
+    void*,
+    Uint8* stream,
+    int length
+)
+{
+    Sint16* samples =
+        reinterpret_cast<Sint16*>(stream);
+
+
+    const int sampleCount =
+        length / (int)sizeof(Sint16);
+
+
+    for (
+        int index = 0;
+        index < sampleCount;
+        index++
+    )
+    {
+        int value =
+            (
+                (int)samples[index] *
+                MASTER_OUTPUT_GAIN_PERCENT
+            ) / 100;
+
+
+        if (value > 32767)
+            value = 32767;
+        else if (value < -32768)
+            value = -32768;
+
+
+        samples[index] =
+            (Sint16)value;
+    }
+}
 
 
 bool hasMusicExtension(
@@ -467,8 +535,24 @@ bool initGameAudio()
     Mix_AllocateChannels(16);
 
 
-    // Keep background music below the UI sound effects.
-    Mix_VolumeMusic(54);
+    // Raise the complete mixed output (music + SFX) by 25%.
+    Mix_SetPostMix(
+        boostMixedAudio,
+        nullptr
+    );
+
+
+    // Channels 14 and 15 are reserved for seamless background-music
+    // transitions. UI sound effects continue to use channel 0.
+    Mix_Volume(
+        MUSIC_CHANNEL_A,
+        MUSIC_VOLUME
+    );
+
+    Mix_Volume(
+        MUSIC_CHANNEL_B,
+        MUSIC_VOLUME
+    );
 
 
     loadSfxChunk(
@@ -535,37 +619,115 @@ bool initGameAudio()
 }
 
 
-void freeCurrentMusic()
+void freeMusicChunk(
+    Mix_Chunk*& chunk
+)
 {
     if (
-        currentMusic
+        chunk
     )
     {
-        Mix_FreeMusic(
-            currentMusic
+        Mix_FreeChunk(
+            chunk
         );
 
 
-        currentMusic =
+        chunk =
             nullptr;
     }
 }
 
 
-bool startNextMusicTrack()
+Uint32 musicChunkDurationMs(
+    Mix_Chunk* chunk
+)
 {
+    if (!chunk)
+        return 0;
+
+
+    int frequency = 0;
+    Uint16 format = 0;
+    int channels = 0;
+
+
     if (
-        !mixerAudioReady ||
+        Mix_QuerySpec(
+            &frequency,
+            &format,
+            &channels
+        ) == 0 ||
+        frequency <= 0 ||
+        channels <= 0
+    )
+    {
+        return 0;
+    }
+
+
+    int bytesPerSample =
+        SDL_AUDIO_BITSIZE(format) / 8;
+
+
+    if (
+        bytesPerSample <= 0
+    )
+    {
+        return 0;
+    }
+
+
+    Uint64 bytesPerSecond =
+        (Uint64)frequency *
+        (Uint64)channels *
+        (Uint64)bytesPerSample;
+
+
+    if (
+        bytesPerSecond == 0
+    )
+    {
+        return 0;
+    }
+
+
+    return
+        (Uint32)(
+            (
+                (Uint64)chunk->alen *
+                1000ULL
+            ) /
+            bytesPerSecond
+        );
+}
+
+
+bool loadNextMusicChunk(
+    Mix_Chunk*& destinationChunk,
+    int& destinationTrackIndex,
+    Uint32& destinationDurationMs
+)
+{
+    freeMusicChunk(
+        destinationChunk
+    );
+
+
+    destinationTrackIndex =
+        -1;
+
+
+    destinationDurationMs =
+        0;
+
+
+    if (
         musicTracks.empty() ||
         musicPlaybackBroken
     )
     {
         return false;
     }
-
-
-    Mix_HaltMusic();
-    freeCurrentMusic();
 
 
     int attempts =
@@ -602,43 +764,335 @@ bool startNextMusicTrack()
         musicShufflePosition++;
 
 
-        currentMusic =
-            Mix_LoadMUS(
+        Mix_Chunk* chunk =
+            Mix_LoadWAV(
                 musicTracks[
                     trackIndex
                 ].c_str()
             );
 
 
-        if (!currentMusic)
+        if (!chunk)
             continue;
 
 
+        Uint32 duration =
+            musicChunkDurationMs(
+                chunk
+            );
+
+
         if (
-            Mix_PlayMusic(
-                currentMusic,
-                0
-            ) == 0
+            duration == 0
         )
         {
-            lastMusicTrackIndex =
-                trackIndex;
+            Mix_FreeChunk(
+                chunk
+            );
 
-
-            return true;
+            continue;
         }
 
 
-        freeCurrentMusic();
+        destinationChunk =
+            chunk;
+
+
+        destinationTrackIndex =
+            trackIndex;
+
+
+        destinationDurationMs =
+            duration;
+
+
+        return true;
     }
 
 
-    // Nothing in the SD-card playlist could be decoded. Leave the
-    // game running normally and avoid retrying every frame.
-    musicPlaybackBroken = true;
-
-
     return false;
+}
+
+
+void clearRetiredMusicIfFinished()
+{
+    if (
+        retiredMusicChunk &&
+        (
+            retiredMusicChannel < 0 ||
+            !Mix_Playing(
+                retiredMusicChannel
+            )
+        )
+    )
+    {
+        freeMusicChunk(
+            retiredMusicChunk
+        );
+
+
+        retiredMusicChannel =
+            -1;
+    }
+}
+
+
+bool prepareQueuedMusicTrack()
+{
+    if (
+        queuedMusicChunk
+    )
+    {
+        return true;
+    }
+
+
+    return
+        loadNextMusicChunk(
+            queuedMusicChunk,
+            queuedMusicTrackIndex,
+            queuedMusicDurationMs
+        );
+}
+
+
+bool startNextMusicTrack()
+{
+    if (
+        !mixerAudioReady ||
+        musicTracks.empty() ||
+        musicPlaybackBroken
+    )
+    {
+        return false;
+    }
+
+
+    Mix_HaltChannel(
+        MUSIC_CHANNEL_A
+    );
+
+
+    Mix_HaltChannel(
+        MUSIC_CHANNEL_B
+    );
+
+
+    freeMusicChunk(
+        currentMusicChunk
+    );
+
+
+    freeMusicChunk(
+        queuedMusicChunk
+    );
+
+
+    freeMusicChunk(
+        retiredMusicChunk
+    );
+
+
+    retiredMusicChannel =
+        -1;
+
+
+    currentMusicTrackIndex =
+        -1;
+
+
+    queuedMusicTrackIndex =
+        -1;
+
+
+    currentMusicChannel =
+        MUSIC_CHANNEL_A;
+
+
+    if (
+        !loadNextMusicChunk(
+            currentMusicChunk,
+            currentMusicTrackIndex,
+            currentMusicDurationMs
+        )
+    )
+    {
+        musicPlaybackBroken = true;
+
+        return false;
+    }
+
+
+    Mix_Volume(
+        currentMusicChannel,
+        MUSIC_VOLUME
+    );
+
+
+    if (
+        Mix_PlayChannel(
+            currentMusicChannel,
+            currentMusicChunk,
+            0
+        ) < 0
+    )
+    {
+        freeMusicChunk(
+            currentMusicChunk
+        );
+
+
+        musicPlaybackBroken = true;
+
+        return false;
+    }
+
+
+    currentMusicStartedAt =
+        SDL_GetTicks();
+
+
+    lastMusicTrackIndex =
+        currentMusicTrackIndex;
+
+
+    musicPausedBySetting =
+        false;
+
+
+    prepareQueuedMusicTrack();
+
+
+    return true;
+}
+
+
+bool transitionToQueuedMusicTrack()
+{
+    if (
+        !currentMusicChunk ||
+        !queuedMusicChunk
+    )
+    {
+        return false;
+    }
+
+
+    clearRetiredMusicIfFinished();
+
+
+    // A previous 90 ms transition should always be finished long before
+    // the next track boundary, but clean it up defensively if needed.
+    if (
+        retiredMusicChunk
+    )
+    {
+        if (
+            retiredMusicChannel >= 0
+        )
+        {
+            Mix_HaltChannel(
+                retiredMusicChannel
+            );
+        }
+
+
+        freeMusicChunk(
+            retiredMusicChunk
+        );
+    }
+
+
+    int oldChannel =
+        currentMusicChannel;
+
+
+    int newChannel =
+        oldChannel == MUSIC_CHANNEL_A
+        ? MUSIC_CHANNEL_B
+        : MUSIC_CHANNEL_A;
+
+
+    Mix_HaltChannel(
+        newChannel
+    );
+
+
+    Mix_Volume(
+        newChannel,
+        MUSIC_VOLUME
+    );
+
+
+    if (
+        Mix_FadeInChannel(
+            newChannel,
+            queuedMusicChunk,
+            0,
+            (int)MUSIC_CROSSFADE_MS
+        ) < 0
+    )
+    {
+        return false;
+    }
+
+
+    Mix_FadeOutChannel(
+        oldChannel,
+        (int)MUSIC_CROSSFADE_MS
+    );
+
+
+    retiredMusicChunk =
+        currentMusicChunk;
+
+
+    retiredMusicChannel =
+        oldChannel;
+
+
+    currentMusicChunk =
+        queuedMusicChunk;
+
+
+    currentMusicTrackIndex =
+        queuedMusicTrackIndex;
+
+
+    currentMusicDurationMs =
+        queuedMusicDurationMs;
+
+
+    currentMusicChannel =
+        newChannel;
+
+
+    currentMusicStartedAt =
+        SDL_GetTicks();
+
+
+    lastMusicTrackIndex =
+        currentMusicTrackIndex;
+
+
+    queuedMusicChunk =
+        nullptr;
+
+
+    queuedMusicTrackIndex =
+        -1;
+
+
+    queuedMusicDurationMs =
+        0;
+
+
+    // Decode the following track immediately while the new one has just
+    // started. The SD card is therefore never touched at the next boundary.
+    prepareQueuedMusicTrack();
+
+
+    return true;
 }
 
 
@@ -654,16 +1108,50 @@ void updateMusicPlayback(
     }
 
 
+    clearRetiredMusicIfFinished();
+
+
     if (
         !enabled
     )
     {
         if (
-            Mix_PlayingMusic() &&
-            !Mix_PausedMusic()
+            !musicPausedBySetting
         )
         {
-            Mix_PauseMusic();
+            if (
+                currentMusicChunk &&
+                Mix_Playing(
+                    currentMusicChannel
+                )
+            )
+            {
+                Mix_Pause(
+                    currentMusicChannel
+                );
+            }
+
+
+            if (
+                retiredMusicChunk &&
+                retiredMusicChannel >= 0 &&
+                Mix_Playing(
+                    retiredMusicChannel
+                )
+            )
+            {
+                Mix_Pause(
+                    retiredMusicChannel
+                );
+            }
+
+
+            musicPauseStartedAt =
+                SDL_GetTicks();
+
+
+            musicPausedBySetting =
+                true;
         }
 
 
@@ -672,20 +1160,160 @@ void updateMusicPlayback(
 
 
     if (
-        Mix_PausedMusic()
+        musicPausedBySetting
     )
     {
-        Mix_ResumeMusic();
+        Uint32 now =
+            SDL_GetTicks();
+
+
+        currentMusicStartedAt +=
+            now - musicPauseStartedAt;
+
+
+        if (
+            currentMusicChunk
+        )
+        {
+            Mix_Resume(
+                currentMusicChannel
+            );
+        }
+
+
+        if (
+            retiredMusicChunk &&
+            retiredMusicChannel >= 0
+        )
+        {
+            Mix_Resume(
+                retiredMusicChannel
+            );
+        }
+
+
+        musicPausedBySetting =
+            false;
+    }
+
+
+    if (
+        !currentMusicChunk
+    )
+    {
+        startNextMusicTrack();
 
         return;
     }
 
 
     if (
-        !Mix_PlayingMusic()
+        !Mix_Playing(
+            currentMusicChannel
+        )
     )
     {
+        // Fallback for an unexpectedly early decoder/channel stop. Normally
+        // the preloaded crossfade below handles every track boundary.
+        if (
+            queuedMusicChunk
+        )
+        {
+            Mix_Chunk* oldCurrent =
+                currentMusicChunk;
+
+
+            currentMusicChunk =
+                queuedMusicChunk;
+
+
+            currentMusicTrackIndex =
+                queuedMusicTrackIndex;
+
+
+            currentMusicDurationMs =
+                queuedMusicDurationMs;
+
+
+            queuedMusicChunk =
+                nullptr;
+
+
+            queuedMusicTrackIndex =
+                -1;
+
+
+            queuedMusicDurationMs =
+                0;
+
+
+            freeMusicChunk(
+                oldCurrent
+            );
+
+
+            Mix_Volume(
+                currentMusicChannel,
+                MUSIC_VOLUME
+            );
+
+
+            if (
+                Mix_PlayChannel(
+                    currentMusicChannel,
+                    currentMusicChunk,
+                    0
+                ) >= 0
+            )
+            {
+                currentMusicStartedAt =
+                    SDL_GetTicks();
+
+
+                lastMusicTrackIndex =
+                    currentMusicTrackIndex;
+
+
+                prepareQueuedMusicTrack();
+
+                return;
+            }
+        }
+
+
         startNextMusicTrack();
+
+        return;
+    }
+
+
+    if (
+        !queuedMusicChunk
+    )
+    {
+        prepareQueuedMusicTrack();
+    }
+
+
+    if (
+        queuedMusicChunk &&
+        currentMusicDurationMs >
+            MUSIC_CROSSFADE_MS
+    )
+    {
+        Uint32 elapsed =
+            SDL_GetTicks() -
+            currentMusicStartedAt;
+
+
+        if (
+            elapsed >=
+                currentMusicDurationMs -
+                MUSIC_CROSSFADE_MS
+        )
+        {
+            transitionToQueuedMusicTrack();
+        }
     }
 }
 
@@ -696,11 +1324,30 @@ void shutdownGameAudio()
         mixerAudioReady
     )
     {
-        Mix_HaltMusic();
+        Mix_HaltChannel(
+            MUSIC_CHANNEL_A
+        );
+
+
+        Mix_HaltChannel(
+            MUSIC_CHANNEL_B
+        );
     }
 
 
-    freeCurrentMusic();
+    freeMusicChunk(
+        currentMusicChunk
+    );
+
+
+    freeMusicChunk(
+        queuedMusicChunk
+    );
+
+
+    freeMusicChunk(
+        retiredMusicChunk
+    );
 
 
     for (
@@ -728,16 +1375,22 @@ void shutdownGameAudio()
         mixerAudioReady
     )
     {
+        Mix_SetPostMix(
+            nullptr,
+            nullptr
+        );
+
+
         Mix_CloseAudio();
 
 
-        mixerAudioReady = false;
+        mixerAudioReady =
+            false;
     }
 
 
     Mix_Quit();
 }
-
 
 void playSfx(
     SfxType type,
