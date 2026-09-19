@@ -1,6 +1,6 @@
 ﻿$ErrorActionPreference = "Stop"
 
-$Version = "1.2.0"
+$Version = "1.2.1"
 $App = "PokeDoku-NX"
 $Nro = "$App.nro"
 $MusicDir = "music"
@@ -39,6 +39,10 @@ else {
 
 if (Test-Path "README.md") {
     Copy-Item "README.md" (Join-Path $ReleaseDir "README.md")
+}
+
+if (Test-Path "LICENSE") {
+    Copy-Item "LICENSE" (Join-Path $ReleaseDir "LICENSE")
 }
 
 Compress-Archive -Path $ReleaseDir -DestinationPath $Zip -CompressionLevel Optimal
