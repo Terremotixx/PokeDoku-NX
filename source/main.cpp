@@ -180,7 +180,7 @@ static bool mixerAudioReady = false;
 // the transition very slightly, avoiding an audible gap between songs.
 const int MUSIC_CHANNEL_A = 14;
 const int MUSIC_CHANNEL_B = 15;
-const int MUSIC_VOLUME = 20;
+const int MUSIC_VOLUME = 54;
 const Uint32 MUSIC_CROSSFADE_MS = 90;
 
 static Mix_Chunk* currentMusicChunk = nullptr;
@@ -209,10 +209,10 @@ static bool musicPlaybackBroken = false;
 
 
 // Final master boost applied after SDL_mixer combines music and SFX.
-// This raises the complete output by 25% while preserving the balance
-// between background music and UI effects. Samples are clamped to the
+// This raises the complete output by 45%. Music is slightly compensated
+// so UI effects gain a little more presence. Samples are clamped to the
 // valid signed 16-bit range to avoid integer overflow.
-const int MASTER_OUTPUT_GAIN_PERCENT = 130;
+const int MASTER_OUTPUT_GAIN_PERCENT = 145;
 
 
 void boostMixedAudio(
@@ -535,7 +535,7 @@ bool initGameAudio()
     Mix_AllocateChannels(16);
 
 
-    // Raise the complete mixed output (music + SFX) by 25%.
+    // Raise the complete mixed output (music + SFX) by 45%.
     Mix_SetPostMix(
         boostMixedAudio,
         nullptr
