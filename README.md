@@ -34,6 +34,7 @@ PokeDoku-NX generates 3×3 Pokémon grid puzzles from a large set of categories 
 - Accelerating navigation while holding the D-Pad, stick or L/R
 - Sound effects
 - Optional background music with shuffle playback
+- Smooth transitions between background tracks
 - Custom `.ogg` and `.mp3` music support from the SD card
 - Confirmation prompts during active puzzles for New Puzzle, Settings and Exit
 - Settings opened mid-puzzle preserve the current board; changed settings apply to the next puzzle
@@ -126,7 +127,7 @@ The Pokémon sprites and sound effects are packed into the NRO through RomFS, so
 
 ## Music
 
-PokeDoku-NX v1.2.0 supports background music stored at:
+PokeDoku-NX v1.2.1 supports background music stored at:
 
 ```text
 /switch/PokeDoku-NX/music/
@@ -146,6 +147,8 @@ The release package can include a default music collection, but the folder is fu
 - Restart PokeDoku-NX after changing the contents of the music folder so the playlist is scanned again.
 
 Tracks are played in a shuffled bag: each discovered track is played once before the playlist is reshuffled. The app attempts to avoid immediately repeating the same track at a shuffle boundary.
+
+Version 1.2.1 also improves transitions between songs so the playlist continues smoothly instead of stopping between tracks.
 
 Background music can be enabled or disabled from **Settings**. Sound effects remain separate from the Music setting.
 
@@ -220,10 +223,16 @@ Total entries:   1213
 - **PokéAPI** — Pokémon data used by the project: https://pokeapi.co/
 - **PokéAPI sprites repository** — source for the standard Pokémon sprites: https://github.com/PokeAPI/sprites
 - **Mega Zygarde custom sprite** — source post by `@kingofthexroad5`: https://x.com/kingofthexroad5/status/1979702959933157509
-- **Default background music** — arrangements/recordings from this YouTube channel: https://www.youtube.com/channel/UCCOBBs4V4WPAFR_G30W6kLw
+- **@CinderyLofi** — Pokémon Lo-Fi arrangements used in the default soundtrack: https://youtu.be/-B-BltVcDJE
 - **Freesound** — source of the sound effects used in the app: https://freesound.org/
 - **devkitPro / devkitA64 / libnx** — Nintendo Switch homebrew toolchain
 - **SDL2, SDL2_image, SDL2_ttf and SDL2_mixer** — rendering, image/font loading and audio playback
+
+## License
+
+The original PokeDoku-NX source code is released under the **MIT License**. See [`LICENSE`](LICENSE).
+
+The MIT License applies only to the original PokeDoku-NX code. Third-party assets, Pokémon-related content, music and sound effects remain subject to their respective owners, licenses and permissions.
 
 ## Disclaimer
 
@@ -233,6 +242,6 @@ PokeDoku-NX is a non-commercial fan-made homebrew project created for educationa
 
 ## Version
 
-**PokeDoku-NX v1.2.0**
+**PokeDoku-NX v1.2.1**
 
 Author: **Terremotixx**
