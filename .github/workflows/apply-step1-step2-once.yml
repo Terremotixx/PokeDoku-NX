@@ -23,19 +23,7 @@ jobs:
       - name: Apply UI and streaming-audio changes
         run: python3 tools/apply_step1_step2_once.py
 
-      - name: Install Switch SDL dependencies
-        shell: bash
-        run: |
-          set -e
-          if command -v dkp-pacman >/dev/null 2>&1; then
-            PM=dkp-pacman
-          else
-            PM=pacman
-          fi
-          "$PM" -Sy --noconfirm
-          "$PM" -S --needed --noconfirm switch-sdl2 switch-sdl2_image switch-sdl2_ttf switch-sdl2_mixer
-
-      - name: Build PokeDoku-NX
+      - name: Build PokeDoku-NX with preinstalled Switch toolchain
         shell: bash
         run: |
           set -e
