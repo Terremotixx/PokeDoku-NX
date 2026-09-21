@@ -1,0 +1,56 @@
+name: Apply Step 1 and Step 2 once
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/apply-step1-step2-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-and-build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Apply UI and streaming-audio changes
+        run: python3 tools/apply_step1_step2_once.py
+
+      - name: Install Switch SDL dependencies
+        shell: bash
+        run: |
+          set -e
+          if command -v dkp-pacman >/dev/null 2>&1; then
+            PM=dkp-pacman
+          else
+            PM=pacman
+          fi
+          "$PM" -Sy --noconfirm
+          "$PM" -S --needed --noconfirm switch-sdl2 switch-sdl2_image switch-sdl2_ttf switch-sdl2_mixer
+
+      - name: Build PokeDoku-NX
+        shell: bash
+        run: |
+          set -e
+          export PKG_CONFIG_PATH=/opt/devkitpro/portlibs/switch/lib/pkgconfig:/opt/devkitpro/portlibs/switch/share/pkgconfig
+          make clean
+          make -j2
+
+      - name: Commit tested source change
+        shell: bash
+        run: |
+          set -e
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/main.cpp
+          git diff --cached --check
+          git commit -m "Improve settings UI and stream background music"
+          git push
