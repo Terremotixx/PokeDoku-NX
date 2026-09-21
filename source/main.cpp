@@ -175,27 +175,20 @@ static Mix_Chunk* sfxChunks[SFX_COUNT] = {};
 
 static bool mixerAudioReady = false;
 
-// Background music uses two dedicated SDL_mixer channels instead of
-// Mix_Music. This lets us preload the next compressed track and overlap
-// the transition very slightly, avoiding an audible gap between songs.
-const int MUSIC_CHANNEL_A = 14;
-const int MUSIC_CHANNEL_B = 15;
+// Background music is streamed with Mix_Music. Unlike Mix_Chunk, this does
+// not decode a complete OGG/MP3 into RAM. One following stream is opened in
+// advance so the SD card and decoder are not touched at the track boundary.
 const int MUSIC_VOLUME = 54;
-const Uint32 MUSIC_CROSSFADE_MS = 90;
+const int MUSIC_FADE_IN_MS = 75;
+const Uint32 MUSIC_PRELOAD_DELAY_MS = 1000;
 
-static Mix_Chunk* currentMusicChunk = nullptr;
-static Mix_Chunk* queuedMusicChunk = nullptr;
-static Mix_Chunk* retiredMusicChunk = nullptr;
-
-static int currentMusicChannel = MUSIC_CHANNEL_A;
-static int retiredMusicChannel = -1;
-
-static Uint32 currentMusicStartedAt = 0;
-static Uint32 currentMusicDurationMs = 0;
-static Uint32 queuedMusicDurationMs = 0;
-static Uint32 musicPauseStartedAt = 0;
+static Mix_Music* currentMusic = nullptr;
+static Mix_Music* queuedMusic = nullptr;
 
 static bool musicPausedBySetting = false;
+static bool queuedMusicLoadAttempted = false;
+
+static Uint32 currentMusicStartedAt = 0;
 
 static std::vector<std::string> musicTracks;
 static std::vector<int> musicShuffleOrder;
@@ -208,11 +201,10 @@ static int lastMusicTrackIndex = -1;
 static bool musicPlaybackBroken = false;
 
 
-// Final master boost applied after SDL_mixer combines music and SFX.
-// This raises the complete output by 45%. Music is slightly compensated
-// so UI effects gain a little more presence. Samples are clamped to the
-// valid signed 16-bit range to avoid integer overflow.
-const int MASTER_OUTPUT_GAIN_PERCENT = 145;
+// Final master boost applied after SDL_mixer combines streamed music and SFX.
+// 160% is a modest step above the previous 145% test level. Samples remain
+// clamped to signed 16-bit range to prevent integer overflow.
+const int MASTER_OUTPUT_GAIN_PERCENT = 160;
 
 
 void boostMixedAudio(
@@ -404,8 +396,6 @@ void rebuildMusicShuffleOrder()
     }
 
 
-    // When a new shuffle cycle starts, do not immediately repeat
-    // the song that closed the previous cycle.
     if (
         musicShuffleOrder.size() > 1 &&
         lastMusicTrackIndex >= 0 &&
@@ -426,8 +416,6 @@ void rebuildMusicShuffleOrder()
 
 void initializeMusicPlaylist()
 {
-    // All background music lives on the SD card so users can freely
-    // add to, replace or remove the soundtrack without rebuilding the NRO.
     mkdir(
         SETTINGS_DIR,
         0777
@@ -456,11 +444,18 @@ void initializeMusicPlaylist()
 
 
     musicPlaybackBroken = false;
+    musicPausedBySetting = false;
+    queuedMusicLoadAttempted = false;
+
+    musicShufflePosition = 0;
+    currentMusicTrackIndex = -1;
+    queuedMusicTrackIndex = -1;
     lastMusicTrackIndex = -1;
 
 
     rebuildMusicShuffleOrder();
 }
+
 
 bool loadSfxChunk(
     SfxType type,
@@ -505,9 +500,6 @@ bool loadSfxChunk(
 
 bool initGameAudio()
 {
-    // Support both OGG and MP3 files from the user-editable SD-card
-    // music folder. SDL_mixer can still open even if one optional
-    // decoder is unavailable.
     Mix_Init(
         MIX_INIT_OGG |
         MIX_INIT_MP3
@@ -535,22 +527,14 @@ bool initGameAudio()
     Mix_AllocateChannels(16);
 
 
-    // Raise the complete mixed output (music + SFX) by 45%.
+    // Raise the complete mixed output (music + SFX) by 60%.
     Mix_SetPostMix(
         boostMixedAudio,
         nullptr
     );
 
 
-    // Channels 14 and 15 are reserved for seamless background-music
-    // transitions. UI sound effects continue to use channel 0.
-    Mix_Volume(
-        MUSIC_CHANNEL_A,
-        MUSIC_VOLUME
-    );
-
-    Mix_Volume(
-        MUSIC_CHANNEL_B,
+    Mix_VolumeMusic(
         MUSIC_VOLUME
     );
 
@@ -619,106 +603,37 @@ bool initGameAudio()
 }
 
 
-void freeMusicChunk(
-    Mix_Chunk*& chunk
+void freeMusicStream(
+    Mix_Music*& music
 )
 {
     if (
-        chunk
+        music
     )
     {
-        Mix_FreeChunk(
-            chunk
+        Mix_FreeMusic(
+            music
         );
 
 
-        chunk =
+        music =
             nullptr;
     }
 }
 
 
-Uint32 musicChunkDurationMs(
-    Mix_Chunk* chunk
+bool loadNextMusicStream(
+    Mix_Music*& destination,
+    int& destinationTrackIndex
 )
 {
-    if (!chunk)
-        return 0;
-
-
-    int frequency = 0;
-    Uint16 format = 0;
-    int channels = 0;
-
-
-    if (
-        Mix_QuerySpec(
-            &frequency,
-            &format,
-            &channels
-        ) == 0 ||
-        frequency <= 0 ||
-        channels <= 0
-    )
-    {
-        return 0;
-    }
-
-
-    int bytesPerSample =
-        SDL_AUDIO_BITSIZE(format) / 8;
-
-
-    if (
-        bytesPerSample <= 0
-    )
-    {
-        return 0;
-    }
-
-
-    Uint64 bytesPerSecond =
-        (Uint64)frequency *
-        (Uint64)channels *
-        (Uint64)bytesPerSample;
-
-
-    if (
-        bytesPerSecond == 0
-    )
-    {
-        return 0;
-    }
-
-
-    return
-        (Uint32)(
-            (
-                (Uint64)chunk->alen *
-                1000ULL
-            ) /
-            bytesPerSecond
-        );
-}
-
-
-bool loadNextMusicChunk(
-    Mix_Chunk*& destinationChunk,
-    int& destinationTrackIndex,
-    Uint32& destinationDurationMs
-)
-{
-    freeMusicChunk(
-        destinationChunk
+    freeMusicStream(
+        destination
     );
 
 
     destinationTrackIndex =
         -1;
-
-
-    destinationDurationMs =
-        0;
 
 
     if (
@@ -764,46 +679,24 @@ bool loadNextMusicChunk(
         musicShufflePosition++;
 
 
-        Mix_Chunk* chunk =
-            Mix_LoadWAV(
+        Mix_Music* music =
+            Mix_LoadMUS(
                 musicTracks[
                     trackIndex
                 ].c_str()
             );
 
 
-        if (!chunk)
+        if (!music)
             continue;
 
 
-        Uint32 duration =
-            musicChunkDurationMs(
-                chunk
-            );
-
-
-        if (
-            duration == 0
-        )
-        {
-            Mix_FreeChunk(
-                chunk
-            );
-
-            continue;
-        }
-
-
-        destinationChunk =
-            chunk;
+        destination =
+            music;
 
 
         destinationTrackIndex =
             trackIndex;
-
-
-        destinationDurationMs =
-            duration;
 
 
         return true;
@@ -814,33 +707,10 @@ bool loadNextMusicChunk(
 }
 
 
-void clearRetiredMusicIfFinished()
-{
-    if (
-        retiredMusicChunk &&
-        (
-            retiredMusicChannel < 0 ||
-            !Mix_Playing(
-                retiredMusicChannel
-            )
-        )
-    )
-    {
-        freeMusicChunk(
-            retiredMusicChunk
-        );
-
-
-        retiredMusicChannel =
-            -1;
-    }
-}
-
-
 bool prepareQueuedMusicTrack()
 {
     if (
-        queuedMusicChunk
+        queuedMusic
     )
     {
         return true;
@@ -848,15 +718,53 @@ bool prepareQueuedMusicTrack()
 
 
     return
-        loadNextMusicChunk(
-            queuedMusicChunk,
-            queuedMusicTrackIndex,
-            queuedMusicDurationMs
+        loadNextMusicStream(
+            queuedMusic,
+            queuedMusicTrackIndex
         );
 }
 
 
-bool startNextMusicTrack()
+bool playCurrentMusicStream()
+{
+    if (
+        !currentMusic
+    )
+    {
+        return false;
+    }
+
+
+    Mix_VolumeMusic(
+        MUSIC_VOLUME
+    );
+
+
+    if (
+        Mix_FadeInMusic(
+            currentMusic,
+            0,
+            MUSIC_FADE_IN_MS
+        ) < 0
+    )
+    {
+        return false;
+    }
+
+
+    currentMusicStartedAt =
+        SDL_GetTicks();
+
+
+    queuedMusicLoadAttempted =
+        false;
+
+
+    return true;
+}
+
+
+bool startFirstMusicTrack()
 {
     if (
         !mixerAudioReady ||
@@ -868,33 +776,17 @@ bool startNextMusicTrack()
     }
 
 
-    Mix_HaltChannel(
-        MUSIC_CHANNEL_A
+    Mix_HaltMusic();
+
+
+    freeMusicStream(
+        currentMusic
     );
 
 
-    Mix_HaltChannel(
-        MUSIC_CHANNEL_B
+    freeMusicStream(
+        queuedMusic
     );
-
-
-    freeMusicChunk(
-        currentMusicChunk
-    );
-
-
-    freeMusicChunk(
-        queuedMusicChunk
-    );
-
-
-    freeMusicChunk(
-        retiredMusicChunk
-    );
-
-
-    retiredMusicChannel =
-        -1;
 
 
     currentMusicTrackIndex =
@@ -905,15 +797,10 @@ bool startNextMusicTrack()
         -1;
 
 
-    currentMusicChannel =
-        MUSIC_CHANNEL_A;
-
-
     if (
-        !loadNextMusicChunk(
-            currentMusicChunk,
-            currentMusicTrackIndex,
-            currentMusicDurationMs
+        !loadNextMusicStream(
+            currentMusic,
+            currentMusicTrackIndex
         )
     )
     {
@@ -923,22 +810,12 @@ bool startNextMusicTrack()
     }
 
 
-    Mix_Volume(
-        currentMusicChannel,
-        MUSIC_VOLUME
-    );
-
-
     if (
-        Mix_PlayChannel(
-            currentMusicChannel,
-            currentMusicChunk,
-            0
-        ) < 0
+        !playCurrentMusicStream()
     )
     {
-        freeMusicChunk(
-            currentMusicChunk
+        freeMusicStream(
+            currentMusic
         );
 
 
@@ -946,10 +823,6 @@ bool startNextMusicTrack()
 
         return false;
     }
-
-
-    currentMusicStartedAt =
-        SDL_GetTicks();
 
 
     lastMusicTrackIndex =
@@ -960,139 +833,136 @@ bool startNextMusicTrack()
         false;
 
 
-    prepareQueuedMusicTrack();
-
-
     return true;
 }
 
 
-bool transitionToQueuedMusicTrack()
+bool advanceMusicTrack()
 {
     if (
-        !currentMusicChunk ||
-        !queuedMusicChunk
+        !mixerAudioReady ||
+        musicTracks.empty() ||
+        musicPlaybackBroken
     )
     {
         return false;
     }
 
 
-    clearRetiredMusicIfFinished();
-
-
-    // A previous 90 ms transition should always be finished long before
-    // the next track boundary, but clean it up defensively if needed.
     if (
-        retiredMusicChunk
+        currentMusicTrackIndex >= 0
     )
+    {
+        lastMusicTrackIndex =
+            currentMusicTrackIndex;
+    }
+
+
+    Mix_HaltMusic();
+
+
+    freeMusicStream(
+        currentMusic
+    );
+
+
+    if (
+        queuedMusic
+    )
+    {
+        currentMusic =
+            queuedMusic;
+
+
+        currentMusicTrackIndex =
+            queuedMusicTrackIndex;
+
+
+        queuedMusic =
+            nullptr;
+
+
+        queuedMusicTrackIndex =
+            -1;
+    }
+    else
     {
         if (
-            retiredMusicChannel >= 0
+            !loadNextMusicStream(
+                currentMusic,
+                currentMusicTrackIndex
+            )
         )
         {
-            Mix_HaltChannel(
-                retiredMusicChannel
-            );
+            musicPlaybackBroken = true;
+
+            return false;
         }
-
-
-        freeMusicChunk(
-            retiredMusicChunk
-        );
     }
-
-
-    int oldChannel =
-        currentMusicChannel;
-
-
-    int newChannel =
-        oldChannel == MUSIC_CHANNEL_A
-        ? MUSIC_CHANNEL_B
-        : MUSIC_CHANNEL_A;
-
-
-    Mix_HaltChannel(
-        newChannel
-    );
-
-
-    Mix_Volume(
-        newChannel,
-        MUSIC_VOLUME
-    );
 
 
     if (
-        Mix_FadeInChannel(
-            newChannel,
-            queuedMusicChunk,
-            0,
-            (int)MUSIC_CROSSFADE_MS
-        ) < 0
+        !playCurrentMusicStream()
     )
     {
+        freeMusicStream(
+            currentMusic
+        );
+
+
+        musicPlaybackBroken = true;
+
         return false;
     }
-
-
-    Mix_FadeOutChannel(
-        oldChannel,
-        (int)MUSIC_CROSSFADE_MS
-    );
-
-
-    retiredMusicChunk =
-        currentMusicChunk;
-
-
-    retiredMusicChannel =
-        oldChannel;
-
-
-    currentMusicChunk =
-        queuedMusicChunk;
-
-
-    currentMusicTrackIndex =
-        queuedMusicTrackIndex;
-
-
-    currentMusicDurationMs =
-        queuedMusicDurationMs;
-
-
-    currentMusicChannel =
-        newChannel;
-
-
-    currentMusicStartedAt =
-        SDL_GetTicks();
 
 
     lastMusicTrackIndex =
         currentMusicTrackIndex;
 
 
-    queuedMusicChunk =
-        nullptr;
-
-
-    queuedMusicTrackIndex =
-        -1;
-
-
-    queuedMusicDurationMs =
-        0;
-
-
-    // Decode the following track immediately while the new one has just
-    // started. The SD card is therefore never touched at the next boundary.
-    prepareQueuedMusicTrack();
-
-
     return true;
+}
+
+
+// Temporary test helper. The final release can remove the shortcut once
+// repeated track transitions have been verified on hardware.
+void skipMusicTrackForTesting()
+{
+    if (
+        !mixerAudioReady ||
+        musicTracks.empty() ||
+        musicPlaybackBroken
+    )
+    {
+        return;
+    }
+
+
+    if (
+        !currentMusic
+    )
+    {
+        startFirstMusicTrack();
+
+        return;
+    }
+
+
+    // Prefer the already-open stream. If the user skips before the normal
+    // one-second preload point, open it now so the test can still proceed.
+    if (
+        !queuedMusic
+    )
+    {
+        queuedMusicLoadAttempted =
+            true;
+
+
+        prepareQueuedMusicTrack();
+    }
+
+
+    advanceMusicTrack();
 }
 
 
@@ -1108,9 +978,6 @@ void updateMusicPlayback(
     }
 
 
-    clearRetiredMusicIfFinished();
-
-
     if (
         !enabled
     )
@@ -1120,34 +987,12 @@ void updateMusicPlayback(
         )
         {
             if (
-                currentMusicChunk &&
-                Mix_Playing(
-                    currentMusicChannel
-                )
+                currentMusic &&
+                Mix_PlayingMusic()
             )
             {
-                Mix_Pause(
-                    currentMusicChannel
-                );
+                Mix_PauseMusic();
             }
-
-
-            if (
-                retiredMusicChunk &&
-                retiredMusicChannel >= 0 &&
-                Mix_Playing(
-                    retiredMusicChannel
-                )
-            )
-            {
-                Mix_Pause(
-                    retiredMusicChannel
-                );
-            }
-
-
-            musicPauseStartedAt =
-                SDL_GetTicks();
 
 
             musicPausedBySetting =
@@ -1163,32 +1008,12 @@ void updateMusicPlayback(
         musicPausedBySetting
     )
     {
-        Uint32 now =
-            SDL_GetTicks();
-
-
-        currentMusicStartedAt +=
-            now - musicPauseStartedAt;
-
-
         if (
-            currentMusicChunk
+            currentMusic &&
+            Mix_PausedMusic()
         )
         {
-            Mix_Resume(
-                currentMusicChannel
-            );
-        }
-
-
-        if (
-            retiredMusicChunk &&
-            retiredMusicChannel >= 0
-        )
-        {
-            Mix_Resume(
-                retiredMusicChannel
-            );
+            Mix_ResumeMusic();
         }
 
 
@@ -1198,122 +1023,42 @@ void updateMusicPlayback(
 
 
     if (
-        !currentMusicChunk
+        !currentMusic
     )
     {
-        startNextMusicTrack();
+        startFirstMusicTrack();
 
         return;
     }
 
 
     if (
-        !Mix_Playing(
-            currentMusicChannel
-        )
+        !Mix_PlayingMusic() &&
+        !Mix_PausedMusic()
     )
     {
-        // Fallback for an unexpectedly early decoder/channel stop. Normally
-        // the preloaded crossfade below handles every track boundary.
-        if (
-            queuedMusicChunk
-        )
-        {
-            Mix_Chunk* oldCurrent =
-                currentMusicChunk;
-
-
-            currentMusicChunk =
-                queuedMusicChunk;
-
-
-            currentMusicTrackIndex =
-                queuedMusicTrackIndex;
-
-
-            currentMusicDurationMs =
-                queuedMusicDurationMs;
-
-
-            queuedMusicChunk =
-                nullptr;
-
-
-            queuedMusicTrackIndex =
-                -1;
-
-
-            queuedMusicDurationMs =
-                0;
-
-
-            freeMusicChunk(
-                oldCurrent
-            );
-
-
-            Mix_Volume(
-                currentMusicChannel,
-                MUSIC_VOLUME
-            );
-
-
-            if (
-                Mix_PlayChannel(
-                    currentMusicChannel,
-                    currentMusicChunk,
-                    0
-                ) >= 0
-            )
-            {
-                currentMusicStartedAt =
-                    SDL_GetTicks();
-
-
-                lastMusicTrackIndex =
-                    currentMusicTrackIndex;
-
-
-                prepareQueuedMusicTrack();
-
-                return;
-            }
-        }
-
-
-        startNextMusicTrack();
+        advanceMusicTrack();
 
         return;
     }
 
 
+    // Open the next stream after the current song has been playing for a
+    // moment, not at the song boundary. Mix_LoadMUS keeps compressed audio
+    // streamed instead of decoding the complete track into a Mix_Chunk.
     if (
-        !queuedMusicChunk
+        !queuedMusic &&
+        !queuedMusicLoadAttempted &&
+        SDL_GetTicks() -
+            currentMusicStartedAt >=
+            MUSIC_PRELOAD_DELAY_MS
     )
     {
+        queuedMusicLoadAttempted =
+            true;
+
+
         prepareQueuedMusicTrack();
-    }
-
-
-    if (
-        queuedMusicChunk &&
-        currentMusicDurationMs >
-            MUSIC_CROSSFADE_MS
-    )
-    {
-        Uint32 elapsed =
-            SDL_GetTicks() -
-            currentMusicStartedAt;
-
-
-        if (
-            elapsed >=
-                currentMusicDurationMs -
-                MUSIC_CROSSFADE_MS
-        )
-        {
-            transitionToQueuedMusicTrack();
-        }
     }
 }
 
@@ -1324,29 +1069,17 @@ void shutdownGameAudio()
         mixerAudioReady
     )
     {
-        Mix_HaltChannel(
-            MUSIC_CHANNEL_A
-        );
-
-
-        Mix_HaltChannel(
-            MUSIC_CHANNEL_B
-        );
+        Mix_HaltMusic();
     }
 
 
-    freeMusicChunk(
-        currentMusicChunk
+    freeMusicStream(
+        currentMusic
     );
 
 
-    freeMusicChunk(
-        queuedMusicChunk
-    );
-
-
-    freeMusicChunk(
-        retiredMusicChunk
+    freeMusicStream(
+        queuedMusic
     );
 
 
@@ -1392,6 +1125,7 @@ void shutdownGameAudio()
     Mix_Quit();
 }
 
+
 void playSfx(
     SfxType type,
     bool enabled
@@ -1409,8 +1143,6 @@ void playSfx(
     }
 
 
-    // Channel 0 intentionally mimics the previous behavior where
-    // a new UI sound replaced the previous one instead of stacking.
     Mix_HaltChannel(0);
 
 
@@ -1553,10 +1285,10 @@ const Category allCategories[] =
     {"FIRST STAGE", CATEGORY_FIRST_STAGE,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"MIDDLE STAGE", CATEGORY_MIDDLE_STAGE,
+    {"SECOND STAGE", CATEGORY_MIDDLE_STAGE,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"FINAL STAGE", CATEGORY_FINAL_STAGE,
+    {"THIRD STAGE", CATEGORY_FINAL_STAGE,
         0u, GEN_UNKNOWN, 0u, 0u},
 
     {"NO EVOLUTION LINE", CATEGORY_NO_EVOLUTION_LINE,
@@ -1565,7 +1297,7 @@ const Category allCategories[] =
     {"NOT FULLY EVOLVED", CATEGORY_NOT_FULLY_EVOLVED,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"EVOLVED BY LEVEL", CATEGORY_EVOLVED_BY_LEVEL,
+    {"EVOLVED BY LEVEL-UP", CATEGORY_EVOLVED_BY_LEVEL,
         0u, GEN_UNKNOWN, 0u, 0u},
 
     {"EVOLVED BY ITEM", CATEGORY_EVOLVED_BY_ITEM,
@@ -1577,7 +1309,7 @@ const Category allCategories[] =
     {"EVOLVED BY FRIENDSHIP", CATEGORY_EVOLVED_BY_FRIENDSHIP,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"BRANCHED EVOLUTION", CATEGORY_BRANCHED_EVOLUTION,
+    {"HAS MULTIPLE EVOLUTIONS", CATEGORY_BRANCHED_EVOLUTION,
         0u, GEN_UNKNOWN, 0u, 0u},
 
     // MOVES
@@ -1676,13 +1408,13 @@ const Category allCategories[] =
     {"FOSSIL", CATEGORY_FOSSIL,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"GMAX", CATEGORY_GMAX,
+    {"GMAX FORM", CATEGORY_GMAX,
         0u, GEN_UNKNOWN, 0u, 0u},
 
     {"LEGENDARY", CATEGORY_LEGENDARY,
         0u, GEN_UNKNOWN, 0u, 0u},
 
-    {"MEGA", CATEGORY_MEGA,
+    {"MEGA EVOLUTION", CATEGORY_MEGA,
         0u, GEN_UNKNOWN, 0u, 0u},
 
     {"MONOTYPE", CATEGORY_MONOTYPE,
@@ -1765,15 +1497,15 @@ const char* categoryNamesSpanish[] =
 
     // EVOLUTION
     "PRIMERA ETAPA",
-    "ETAPA INTERMEDIA",
-    "ETAPA FINAL",
+    "SEGUNDA ETAPA",
+    "TERCERA ETAPA",
     "SIN LÍNEA EVOLUTIVA",
     "PUEDE EVOLUCIONAR",
-    "EVOLUCIÓN POR NIVEL",
-    "EVOLUCIÓN POR OBJETO",
-    "EVOLUCIÓN POR INTERCAMBIO",
-    "EVOLUCIÓN POR AMISTAD",
-    "EVOLUCIÓN RAMIFICADA",
+    "EVOLUCIONADO POR NIVEL",
+    "EVOLUCIONADO POR OBJETO",
+    "EVOLUCIONADO POR INTERCAMBIO",
+    "EVOLUCIONADO POR AMISTAD",
+    "TIENE VARIAS EVOLUCIONES",
 
     // MOVES
     "ACROBATA",
@@ -1810,11 +1542,11 @@ const char* categoryNamesSpanish[] =
     "DOBLE TIPO",
     "POKÉMON INICIAL",
     "FÓSIL",
-    "GMAX",
+    "FORMA GIGAMAX",
     "LEGENDARIO",
-    "MEGA",
+    "MEGA EVOLUCIÓN",
     "MONOTIPO",
-    "MÍTICO",
+    "SINGULAR",
     "PARADOJA",
     "ULTRAENTE",
     "FORMA REGIONAL"
@@ -7395,6 +7127,19 @@ int main(
             );
 
 
+        // Temporary audio test shortcut. Remove after transition testing.
+        if (
+            settings.musicEnabled &&
+            (
+                buttonsDown &
+                HidNpadButton_StickR
+            )
+        )
+        {
+            skipMusicTrackForTesting();
+        }
+
+
         HidAnalogStickState stick =
             padGetStickPos(
                 &pad,
@@ -8460,6 +8205,11 @@ int main(
                         {
                             selectedOption--;
                         }
+                        else
+                        {
+                            settingsFocus =
+                                SETTINGS_GENERATE;
+                        }
                     }
 
                     else if (
@@ -8582,6 +8332,19 @@ int main(
                             settingsFocus =
                                 SETTINGS_GENERATE;
                         }
+                    }
+
+                    else if (
+                        settingsFocus ==
+                        SETTINGS_GENERATE
+                    )
+                    {
+                        settingsFocus =
+                            SETTINGS_OPTIONS;
+
+
+                        selectedOption =
+                            0;
                     }
                 }
 
@@ -8962,7 +8725,7 @@ int main(
 
                     SDL_Rect allButton =
                     {
-                        675,
+                        790,
                         340,
                         190,
                         42
@@ -9040,13 +8803,13 @@ int main(
 
                             SDL_Rect categoryRow =
                             {
-                                175,
+                                165,
 
                                 340 +
                                 row *
                                 39,
 
-                                440,
+                                585,
 
                                 34
                             };
@@ -11470,7 +11233,7 @@ int main(
             {
                 145,
                 328,
-                505,
+                625,
                 290
             };
 
@@ -11508,7 +11271,7 @@ int main(
 
             SDL_Rect allButton =
             {
-                675,
+                790,
                 340,
                 190,
                 42
@@ -11638,7 +11401,7 @@ int main(
                     row *
                     39,
 
-                    465,
+                    585,
 
                     34
                 };
@@ -11687,7 +11450,7 @@ int main(
 
 
                 const int categoryLabelMaxWidth =
-                    373;
+                    520;
 
 
                 if (
@@ -11742,7 +11505,7 @@ int main(
 
                 SDL_Rect checkbox =
                 {
-                    categoryRow.x + 395,
+                    categoryRow.x + 540,
                     categoryRow.y + 7,
                     20,
                     20
@@ -11802,7 +11565,7 @@ int main(
                 renderer,
                 smallFont,
                 tr("Swipe to scroll", "Desliza para desplazarte"),
-                690,
+                800,
                 397,
                 muted
             );
