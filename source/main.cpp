@@ -17546,7 +17546,7 @@ int main(
                 renderer,
                 player1Card,
                 playerOneReady ? panelSelected : panel,
-                playerOneReady ? (settings.lightTheme ? border : blueAccent) : accentBright,
+                (settings.lightTheme ? border : blueAccent),
                 playerOneReady ? 3 : 4
             );
 
@@ -17555,7 +17555,7 @@ int main(
                 renderer,
                 player2Card,
                 playerTwoReady ? panelSelected : panel,
-                playerTwoReady ? (settings.lightTheme ? border : blueAccent) : accentBright,
+                (settings.lightTheme ? border : blueAccent),
                 playerTwoReady ? 3 : 4
             );
 
@@ -17646,7 +17646,7 @@ int main(
                 font,
                 playerOneStatus,
                 p1Status,
-                playerOneReady ? (settings.lightTheme ? accent : blueAccent) : accent
+                (settings.lightTheme ? accent : blueAccent)
             );
 
 
@@ -17736,7 +17736,7 @@ int main(
                 font,
                 playerTwoStatus,
                 p2Status,
-                playerTwoReady ? (settings.lightTheme ? accent : blueAccent) : accent
+                (settings.lightTheme ? accent : blueAccent)
             );
 
 
