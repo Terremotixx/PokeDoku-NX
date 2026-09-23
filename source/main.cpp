@@ -17546,7 +17546,7 @@ int main(
                 renderer,
                 player1Card,
                 playerOneReady ? panelSelected : panel,
-                playerOneReady ? blueAccent : accentBright,
+                playerOneReady ? (settings.lightTheme ? border : blueAccent) : accentBright,
                 playerOneReady ? 3 : 4
             );
 
@@ -17555,7 +17555,7 @@ int main(
                 renderer,
                 player2Card,
                 playerTwoReady ? panelSelected : panel,
-                playerTwoReady ? blueAccent : accentBright,
+                playerTwoReady ? (settings.lightTheme ? border : blueAccent) : accentBright,
                 playerTwoReady ? 3 : 4
             );
 
@@ -17606,7 +17606,9 @@ int main(
                     padGetStyleSet(
                         ticTacToePads[source]
                     ),
-                    blueAccent
+                    settings.lightTheme
+                        ? accent
+                        : blueAccent
                 );
 
                 if (source == 8)
@@ -17644,7 +17646,7 @@ int main(
                 font,
                 playerOneStatus,
                 p1Status,
-                playerOneReady ? blueAccent : accent
+                playerOneReady ? (settings.lightTheme ? accent : blueAccent) : accent
             );
 
 
@@ -17694,7 +17696,9 @@ int main(
                     padGetStyleSet(
                         ticTacToePads[source]
                     ),
-                    blueAccent
+                    settings.lightTheme
+                        ? accent
+                        : blueAccent
                 );
 
                 if (source == 8)
@@ -17732,7 +17736,7 @@ int main(
                 font,
                 playerTwoStatus,
                 p2Status,
-                playerTwoReady ? blueAccent : accent
+                playerTwoReady ? (settings.lightTheme ? accent : blueAccent) : accent
             );
 
 
