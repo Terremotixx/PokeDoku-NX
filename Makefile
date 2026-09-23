@@ -23,7 +23,7 @@ ROMFS       := romfs
 
 APP_TITLE   := PokeDoku-NX
 APP_AUTHOR  := Terremotixx
-APP_VERSION := 1.2.1
+APP_VERSION := 2.0.0
 ICON        := icon.jpg
 
 #---------------------------------------------------------------------------------
