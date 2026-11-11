@@ -2398,6 +2398,377 @@ static const unsigned char controller_handheld_png[] = {
 static SDL_Texture* controllerTextures[4] = {};
 static bool controllerTextureAttempted[4] = {};
 
+
+enum ControllerLayout
+{
+    CONTROLLER_LAYOUT_STANDARD,
+    CONTROLLER_LAYOUT_JOY_LEFT_HORIZONTAL,
+    CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL
+};
+
+
+ControllerLayout getControllerLayout(
+    PadState* pad
+)
+{
+    if (!pad)
+    {
+        return CONTROLLER_LAYOUT_STANDARD;
+    }
+
+
+    // Switch Lite and normal handheld mode have the full control set.
+    // Never treat the built-in controls as a single horizontal Joy-Con.
+    if (
+        padIsHandheld(
+            pad
+        )
+    )
+    {
+        return CONTROLLER_LAYOUT_STANDARD;
+    }
+
+
+    u32 style =
+        padGetStyleSet(
+            pad
+        );
+
+
+    if (
+        style &
+        HidNpadStyleTag_NpadJoyLeft
+    )
+    {
+        return
+            CONTROLLER_LAYOUT_JOY_LEFT_HORIZONTAL;
+    }
+
+
+    if (
+        style &
+        HidNpadStyleTag_NpadJoyRight
+    )
+    {
+        return
+            CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL;
+    }
+
+
+    return
+        CONTROLLER_LAYOUT_STANDARD;
+}
+
+
+u64 normalizeHorizontalJoyConButtons(
+    PadState* pad,
+    u64 buttons
+)
+{
+    ControllerLayout layout =
+        getControllerLayout(
+            pad
+        );
+
+
+    if (
+        layout ==
+        CONTROLLER_LAYOUT_JOY_LEFT_HORIZONTAL
+    )
+    {
+        u64 result =
+            buttons &
+            ~(
+                HidNpadButton_Up |
+                HidNpadButton_Down |
+                HidNpadButton_Left |
+                HidNpadButton_Right |
+                HidNpadButton_LeftSL |
+                HidNpadButton_LeftSR |
+                HidNpadButton_StickL |
+                HidNpadButton_L |
+                HidNpadButton_ZL
+            );
+
+
+        // Face buttons by PHYSICAL position:
+        // right = Select, bottom = Back, top = New, left = Settings.
+        if (buttons & HidNpadButton_Down)
+            result |= HidNpadButton_A;
+
+        if (buttons & HidNpadButton_Left)
+            result |= HidNpadButton_B;
+
+        if (buttons & HidNpadButton_Right)
+            result |= HidNpadButton_X;
+
+        if (buttons & HidNpadButton_Up)
+            result |= HidNpadButton_Y;
+
+
+        // Horizontal Joy-Con L:
+        // ZL = Request draw
+        // SL / SR = Jump backward / forward
+        // L = Menu
+        // - = Quick Settings
+        // Stick press/hold = Next song
+        if (buttons & HidNpadButton_ZL)
+        {
+            result |= HidNpadButton_ZL;
+            result |= HidNpadButton_ZR;
+        }
+
+        if (buttons & HidNpadButton_LeftSL)
+            result |= HidNpadButton_L;
+
+        if (buttons & HidNpadButton_LeftSR)
+            result |= HidNpadButton_R;
+
+        if (buttons & HidNpadButton_L)
+            result |= HidNpadButton_Plus;
+
+        if (buttons & HidNpadButton_StickL)
+            result |= HidNpadButton_StickR;
+
+
+        return result;
+    }
+
+
+    if (
+        layout ==
+        CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL
+    )
+    {
+        u64 result =
+            buttons &
+            ~(
+                HidNpadButton_A |
+                HidNpadButton_B |
+                HidNpadButton_X |
+                HidNpadButton_Y |
+                HidNpadButton_RightSL |
+                HidNpadButton_RightSR |
+                HidNpadButton_R |
+                HidNpadButton_ZR |
+                HidNpadButton_Plus
+            );
+
+
+        // Face buttons by PHYSICAL position:
+        // right = Select, bottom = Back, top = New, left = Settings.
+        if (buttons & HidNpadButton_X)
+            result |= HidNpadButton_A;
+
+        if (buttons & HidNpadButton_A)
+            result |= HidNpadButton_B;
+
+        if (buttons & HidNpadButton_Y)
+            result |= HidNpadButton_X;
+
+        if (buttons & HidNpadButton_B)
+            result |= HidNpadButton_Y;
+
+
+        // Horizontal Joy-Con R:
+        // ZR = Request draw (logical ZL)
+        // SL / SR = Jump backward / forward
+        // R = Menu
+        // + = Quick Settings (logical -)
+        // Stick press/hold = Next song
+        if (buttons & HidNpadButton_ZR)
+        {
+            result |= HidNpadButton_ZL;
+            result |= HidNpadButton_ZR;
+        }
+
+        if (buttons & HidNpadButton_RightSL)
+            result |= HidNpadButton_L;
+
+        if (buttons & HidNpadButton_RightSR)
+            result |= HidNpadButton_R;
+
+        if (buttons & HidNpadButton_R)
+            result |= HidNpadButton_Plus;
+
+        if (buttons & HidNpadButton_Plus)
+            result |= HidNpadButton_Minus;
+
+
+        return result;
+    }
+
+
+    return buttons;
+}
+
+
+void normalizeHorizontalJoyConStick(
+    PadState* pad,
+    HidAnalogStickState& stick
+)
+{
+    ControllerLayout layout =
+        getControllerLayout(
+            pad
+        );
+
+
+    s32 rawX =
+        stick.x;
+
+    s32 rawY =
+        stick.y;
+
+
+    if (
+        layout ==
+        CONTROLLER_LAYOUT_JOY_LEFT_HORIZONTAL
+    )
+    {
+        stick.x =
+            -rawY;
+
+        stick.y =
+            rawX;
+    }
+
+    else if (
+        layout ==
+        CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL
+    )
+    {
+        stick.x =
+            rawY;
+
+        stick.y =
+            -rawX;
+    }
+}
+
+
+bool ensureLoneJoyConsUseHorizontalAssignment()
+{
+    bool changed =
+        false;
+
+
+    const HidNpadIdType ids[8] =
+    {
+        HidNpadIdType_No1,
+        HidNpadIdType_No2,
+        HidNpadIdType_No3,
+        HidNpadIdType_No4,
+        HidNpadIdType_No5,
+        HidNpadIdType_No6,
+        HidNpadIdType_No7,
+        HidNpadIdType_No8
+    };
+
+
+    for (
+        int i = 0;
+        i < 8;
+        i++
+    )
+    {
+        HidNpadIdType id =
+            ids[i];
+
+
+        u32 style =
+            hidGetNpadStyleSet(
+                id
+            );
+
+
+        // Already a dedicated single Joy-Con: our normalizer handles it
+        // horizontally. Full controllers and handheld are left untouched.
+        if (
+            style &
+            (
+                HidNpadStyleTag_NpadJoyLeft |
+                HidNpadStyleTag_NpadJoyRight
+            )
+        )
+        {
+            continue;
+        }
+
+
+        if (
+            !(style & HidNpadStyleTag_NpadJoyDual)
+        )
+        {
+            continue;
+        }
+
+
+        HidNpadJoyDualState state = {};
+
+
+        if (
+            hidGetNpadStatesJoyDual(
+                id,
+                &state,
+                1
+            ) == 0
+        )
+        {
+            continue;
+        }
+
+
+        bool leftConnected =
+            (
+                state.attributes &
+                HidNpadAttribute_IsLeftConnected
+            ) != 0;
+
+
+        bool rightConnected =
+            (
+                state.attributes &
+                HidNpadAttribute_IsRightConnected
+            ) != 0;
+
+
+        // Keep a genuine Joy-Con pair in dual mode. Only convert a dual slot
+        // when exactly one half is actually present.
+        if (
+            leftConnected ==
+            rightConnected
+        )
+        {
+            continue;
+        }
+
+
+        HidNpadJoyDeviceType type =
+            leftConnected
+                ? HidNpadJoyDeviceType_Left
+                : HidNpadJoyDeviceType_Right;
+
+
+        if (
+            R_SUCCEEDED(
+                hidSetNpadJoyAssignmentModeSingle(
+                    id,
+                    type
+                )
+            )
+        )
+        {
+            changed =
+                true;
+        }
+    }
+
+
+    return changed;
+}
+
+
 void drawControllerImage(
     SDL_Renderer* renderer,
     SDL_Rect area,
@@ -2529,7 +2900,46 @@ void drawControllerImage(
             );
 
 
-            SDL_RenderCopy(renderer, controllerTextures[which], nullptr, &dst);
+            double rotation =
+                0.0;
+
+
+            if (
+                !(style & HidNpadStyleTag_NpadJoyDual)
+            )
+            {
+                if (
+                    which == 0
+                    &&
+                    (style & HidNpadStyleTag_NpadJoyLeft)
+                )
+                {
+                    // Left Joy-Con sideways: stick ends up on the left.
+                    rotation =
+                        -90.0;
+                }
+                else if (
+                    which == 1
+                    &&
+                    (style & HidNpadStyleTag_NpadJoyRight)
+                )
+                {
+                    // Right Joy-Con sideways: stick left, face buttons right.
+                    rotation =
+                        90.0;
+                }
+            }
+
+
+            SDL_RenderCopyEx(
+                renderer,
+                controllerTextures[which],
+                nullptr,
+                &dst,
+                rotation,
+                nullptr,
+                SDL_FLIP_NONE
+            );
         }
     };
 
@@ -4194,6 +4604,24 @@ bool openPokemonSearchKeyboard(
     );
 
 
+    swkbdConfigSetBlurBackground(
+        &keyboard,
+        1
+    );
+
+
+    swkbdConfigSetTextDrawType(
+        &keyboard,
+        SwkbdTextDrawType_Box
+    );
+
+
+    swkbdConfigSetReturnButtonFlag(
+        &keyboard,
+        0
+    );
+
+
     swkbdConfigSetHeaderText(
         &keyboard,
         tr("Search Pokemon", "Buscar Pokémon")
@@ -4247,6 +4675,34 @@ bool openPokemonSearchKeyboard(
     ] = {};
 
 
+    float previousMainAppletVolume =
+        1.0f;
+
+
+    float previousLibraryAppletVolume =
+        1.0f;
+
+
+    bool restoreExpectedMasterVolume =
+        R_SUCCEEDED(
+            appletGetExpectedMasterVolume(
+                &previousMainAppletVolume,
+                &previousLibraryAppletVolume
+            )
+        );
+
+
+    if (
+        restoreExpectedMasterVolume
+    )
+    {
+        appletSetExpectedMasterVolume(
+            1.0f,
+            1.0f
+        );
+    }
+
+
     result =
         swkbdShow(
             &keyboard,
@@ -4258,6 +4714,17 @@ bool openPokemonSearchKeyboard(
     swkbdClose(
         &keyboard
     );
+
+
+    if (
+        restoreExpectedMasterVolume
+    )
+    {
+        appletSetExpectedMasterVolume(
+            previousMainAppletVolume,
+            previousLibraryAppletVolume
+        );
+    }
 
 
     if (
@@ -4303,9 +4770,6 @@ bool openPokemonSearchKeyboard(
         }
 
 
-        // A Pokedex-number search is a jump, not a filter.
-        // After jumping, restore the full selector so the player
-        // can freely browse to #259, #261, forms, etc.
         clearPokemonSearch();
     }
 
@@ -4422,6 +4886,527 @@ void drawText(
 
     SDL_FreeSurface(
         surface
+    );
+}
+
+
+static SDL_Texture* joyFaceSpriteTexture =
+    nullptr;
+
+
+SDL_Texture* getJoyFaceSpriteTexture(
+    SDL_Renderer* renderer
+)
+{
+    if (
+        !joyFaceSpriteTexture
+    )
+    {
+        joyFaceSpriteTexture =
+            IMG_LoadTexture(
+                renderer,
+                "romfs:/ui/joy_face_buttons_sheet.png"
+            );
+
+
+        if (
+            joyFaceSpriteTexture
+        )
+        {
+            SDL_SetTextureBlendMode(
+                joyFaceSpriteTexture,
+                SDL_BLENDMODE_BLEND
+            );
+        }
+    }
+
+
+    return joyFaceSpriteTexture;
+}
+
+
+enum JoyFaceHintPosition
+{
+    JOY_FACE_TOP,
+    JOY_FACE_BOTTOM,
+    JOY_FACE_LEFT,
+    JOY_FACE_RIGHT
+};
+
+
+void drawControlCircle(
+    SDL_Renderer* renderer,
+    int centerX,
+    int centerY,
+    int radius,
+    SDL_Color color,
+    bool filled
+)
+{
+    (void)filled;
+
+
+    setColor(
+        renderer,
+        color
+    );
+
+
+    // Draw the icon as filled circles even for the inactive buttons.
+    // It looks cleaner and more recognisably round at this size.
+    for (
+        int y = -radius;
+        y <= radius;
+        y++
+    )
+    {
+        int horizontalHalfWidth =
+            (int)sqrt(
+                (double)(
+                    radius * radius
+                    -
+                    y * y
+                )
+            );
+
+
+        SDL_RenderDrawLine(
+            renderer,
+            centerX - horizontalHalfWidth,
+            centerY + y,
+            centerX + horizontalHalfWidth,
+            centerY + y
+        );
+    }
+}
+
+
+static SDL_Texture* quickSettingsBlueCircleTexture =
+    nullptr;
+
+
+static SDL_Texture* quickSettingsRedCircleTexture =
+    nullptr;
+
+
+SDL_Texture* getQuickSettingsCircleTexture(
+    SDL_Renderer* renderer,
+    bool lightTheme
+)
+{
+    SDL_Texture*& texture =
+        lightTheme
+            ? quickSettingsRedCircleTexture
+            : quickSettingsBlueCircleTexture;
+
+
+    if (
+        !texture
+    )
+    {
+        texture =
+            IMG_LoadTexture(
+                renderer,
+                lightTheme
+                    ? "romfs:/ui/joystick_red_36.png"
+                    : "romfs:/ui/joystick_blue_36.png"
+            );
+
+
+        if (
+            texture
+        )
+        {
+            SDL_SetTextureBlendMode(
+                texture,
+                SDL_BLENDMODE_BLEND
+            );
+        }
+    }
+
+
+    return texture;
+}
+
+
+void drawJoyActiveCircleHint(
+    SDL_Renderer* renderer,
+    int centerX,
+    int centerY,
+    bool lightTheme
+)
+{
+    SDL_Texture* texture =
+        getQuickSettingsCircleTexture(
+            renderer,
+            lightTheme
+        );
+
+
+    if (
+        !texture
+    )
+    {
+        return;
+    }
+
+
+    const int iconSize =
+        36;
+
+
+    SDL_Rect destinationRect =
+    {
+        centerX - iconSize / 2,
+        centerY - iconSize / 2,
+        iconSize,
+        iconSize
+    };
+
+
+    SDL_SetTextureColorMod(
+        texture,
+        255,
+        255,
+        255
+    );
+
+
+    SDL_SetTextureAlphaMod(
+        texture,
+        255
+    );
+
+
+    SDL_RenderCopy(
+        renderer,
+        texture,
+        nullptr,
+        &destinationRect
+    );
+}
+
+void drawJoyFaceHint(
+    SDL_Renderer* renderer,
+    int centerX,
+    int centerY,
+    JoyFaceHintPosition activePosition,
+    SDL_Color inactiveColor,
+    SDL_Color activeColor
+)
+{
+    (void)inactiveColor;
+
+
+    SDL_Texture* texture =
+        getJoyFaceSpriteTexture(
+            renderer
+        );
+
+
+    if (
+        !texture
+    )
+    {
+        return;
+    }
+
+
+    int column =
+        0;
+
+
+    switch (
+        activePosition
+    )
+    {
+        case JOY_FACE_TOP:
+            column =
+                0;
+            break;
+
+        case JOY_FACE_LEFT:
+            column =
+                1;
+            break;
+
+        case JOY_FACE_RIGHT:
+            column =
+                2;
+            break;
+
+        case JOY_FACE_BOTTOM:
+            column =
+                3;
+            break;
+    }
+
+
+    // Row 0: dark theme -> white rings + blue active button.
+    // Row 1: light theme -> dark rings + red active button.
+    bool lightThemeIcon =
+        activeColor.r >
+        activeColor.b;
+
+
+    // Final sprite sheet is already 36x36 per icon.
+    // SDL renders 36x36 -> 36x36, so there is NO runtime scaling.
+    const int sourceSize =
+        36;
+
+
+    SDL_Rect sourceRect =
+    {
+        column * sourceSize,
+        lightThemeIcon
+            ? sourceSize
+            : 0,
+        sourceSize,
+        sourceSize
+    };
+
+
+    const int renderSize =
+        36;
+
+
+    SDL_Rect destinationRect =
+    {
+        centerX - renderSize / 2,
+        centerY - renderSize / 2,
+        renderSize,
+        renderSize
+    };
+
+
+    SDL_SetTextureColorMod(
+        texture,
+        255,
+        255,
+        255
+    );
+
+
+    SDL_SetTextureAlphaMod(
+        texture,
+        255
+    );
+
+
+    SDL_RenderCopy(
+        renderer,
+        texture,
+        &sourceRect,
+        &destinationRect
+    );
+}
+
+
+void drawAdaptiveFaceControlHint(
+    SDL_Renderer* renderer,
+    TTF_Font* font,
+    const SDL_Rect& area,
+    const char* standardButton,
+    JoyFaceHintPosition joyPosition,
+    const char* actionText,
+    bool showStandard,
+    bool showJoyCon,
+    SDL_Color textColor,
+    SDL_Color joyInactiveColor,
+    SDL_Color joyActiveColor
+)
+{
+    if (
+        !showStandard
+        &&
+        !showJoyCon
+    )
+    {
+        showStandard =
+            true;
+    }
+
+
+    int standardWidth =
+        0;
+
+
+    int separatorWidth =
+        0;
+
+
+    int actionWidth =
+        0;
+
+
+    int unusedHeight =
+        0;
+
+
+    if (
+        showStandard
+        &&
+        TTF_SizeUTF8(
+            font,
+            standardButton,
+            &standardWidth,
+            &unusedHeight
+        ) != 0
+    )
+    {
+        standardWidth =
+            0;
+    }
+
+
+    const char* separator =
+        " / ";
+
+
+    if (
+        showStandard
+        &&
+        showJoyCon
+        &&
+        TTF_SizeUTF8(
+            font,
+            separator,
+            &separatorWidth,
+            &unusedHeight
+        ) != 0
+    )
+    {
+        separatorWidth =
+            0;
+    }
+
+
+    if (
+        TTF_SizeUTF8(
+            font,
+            actionText,
+            &actionWidth,
+            &unusedHeight
+        ) != 0
+    )
+    {
+        actionWidth =
+            0;
+    }
+
+
+    const int joyIconWidth =
+        showJoyCon
+            ? 36
+            : 0;
+
+
+    const int actionGap =
+        6;
+
+
+    int totalWidth =
+        standardWidth
+        +
+        separatorWidth
+        +
+        joyIconWidth
+        +
+        actionGap
+        +
+        actionWidth;
+
+
+    int x =
+        area.w == 0
+            ? area.x
+            : area.x +
+                (
+                    area.w -
+                    totalWidth
+                ) / 2;
+
+
+    int textY =
+        area.y +
+        (
+            area.h -
+            TTF_FontHeight(
+                font
+            )
+        ) / 2;
+
+
+    if (
+        showStandard
+    )
+    {
+        drawText(
+            renderer,
+            font,
+            standardButton,
+            x,
+            textY,
+            textColor
+        );
+
+
+        x +=
+            standardWidth;
+    }
+
+
+    if (
+        showStandard
+        &&
+        showJoyCon
+    )
+    {
+        drawText(
+            renderer,
+            font,
+            separator,
+            x,
+            textY,
+            textColor
+        );
+
+
+        x +=
+            separatorWidth;
+    }
+
+
+    if (
+        showJoyCon
+    )
+    {
+        drawJoyFaceHint(
+            renderer,
+            x + joyIconWidth / 2,
+            area.y + area.h / 2,
+            joyPosition,
+            joyInactiveColor,
+            joyActiveColor
+        );
+
+
+        x +=
+            joyIconWidth;
+    }
+
+
+    x +=
+        actionGap;
+
+
+    drawText(
+        renderer,
+        font,
+        actionText,
+        x,
+        textY,
+        textColor
     );
 }
 
@@ -9433,6 +10418,18 @@ int main(
     );
 
 
+    // Individual Joy-Cons are used horizontally, like a mini controller.
+    hidSetNpadJoyHoldType(
+        HidNpadJoyHoldType_Horizontal
+    );
+
+
+    // If the system still has a lone Joy-Con sitting in a dual/vertical
+    // assignment, convert only that lone half to single mode. A real L+R
+    // Joy-Con pair stays paired and continues to behave as a standard pad.
+    ensureLoneJoyConsUseHorizontalAssignment();
+
+
     PadState pad;
     PadState padNo1;
     PadState padNo2;
@@ -9861,6 +10858,30 @@ int main(
         }
 
 
+        // Also catch a lone Joy-Con connected after the app has already
+        // started. Do not split a complete L+R pair.
+        if (
+            ensureLoneJoyConsUseHorizontalAssignment()
+        )
+        {
+            padUpdate(
+                &pad
+            );
+
+
+            for (
+                int i = 0;
+                i < 9;
+                i++
+            )
+            {
+                padUpdate(
+                    ticTacToePads[i]
+                );
+            }
+        }
+
+
         bool ticTacToeControllerActive[9] = {};
 
 
@@ -10009,14 +11030,61 @@ int main(
             hidLaCreateControllerSupportArg(&arg);
             arg.hdr.player_count_min = 2;
             arg.hdr.player_count_max = 2;
+            // Keep the native applet in normal two-player mode so both
+            // player slots stay visible. Individual Joy-Cons can still occupy
+            // those slots and are restored to horizontal hold on return.
             arg.hdr.enable_single_mode = 0;
             appletSetFocusHandlingMode(
                 AppletFocusHandlingMode_SuspendHomeSleepNotify);
+
+
+            float previousMainAppletVolume =
+                1.0f;
+            float previousLibraryAppletVolume =
+                1.0f;
+
+            bool restoreControllerAppletVolume =
+                R_SUCCEEDED(
+                    appletGetExpectedMasterVolume(
+                        &previousMainAppletVolume,
+                        &previousLibraryAppletVolume
+                    )
+                );
+
+            if (restoreControllerAppletVolume)
+            {
+                appletSetExpectedMasterVolume(
+                    1.0f,
+                    1.0f
+                );
+            }
+
+
             // false opens the L + R pairing UI, not the HOME controller menu.
             Result rc = hidLaShowControllerSupportForSystem(&result, &arg, false);
             if (R_FAILED(rc))
                 rc = hidLaShowControllerSupport(&result, &arg);
+
+
+            if (restoreControllerAppletVolume)
+            {
+                appletSetExpectedMasterVolume(
+                    previousMainAppletVolume,
+                    previousLibraryAppletVolume
+                );
+            }
+
+
             appletSetFocusHandlingMode(AppletFocusHandlingMode_NoSuspend);
+
+            // The controller applet can change assignment/hold state.
+            // Restore our horizontal rule immediately after returning.
+            hidSetNpadJoyHoldType(
+                HidNpadJoyHoldType_Horizontal
+            );
+
+            ensureLoneJoyConsUseHorizontalAssignment();
+
             padUpdate(&pad);
             for (int i = 0; i < 9; ++i)
             {
@@ -10038,23 +11106,101 @@ int main(
         };
 
         u64 buttonsDown =
-            padGetButtonsDown(
-                &pad
-            );
+            0;
 
 
         u64 buttonsHeld =
-            padGetButtons(
-                &pad
-            );
+            0;
 
 
-        // Deliberate R3 hold avoids accidental track skips.
+        // Build one logical input stream from every active concrete pad.
+        // Per-Npad states preserve whether the device is Joy-Con L/R,
+        // Handheld or a full controller.
+        for (
+            int i = 0;
+            i < 9;
+            i++
+        )
+        {
+            if (
+                !ticTacToeControllerActive[i]
+            )
+            {
+                continue;
+            }
+
+
+            buttonsDown |=
+                normalizeHorizontalJoyConButtons(
+                    ticTacToePads[i],
+                    padGetButtonsDown(
+                        ticTacToePads[i]
+                    )
+                );
+
+
+            buttonsHeld |=
+                normalizeHorizontalJoyConButtons(
+                    ticTacToePads[i],
+                    padGetButtons(
+                        ticTacToePads[i]
+                    )
+                );
+        }
+
+
+        // Deliberate stick hold avoids accidental track skips.
         bool musicSkipHeld =
             (
                 buttonsHeld &
-                HidNpadButton_StickR
+                (
+                    HidNpadButton_StickL
+                    |
+                    HidNpadButton_StickR
+                )
             ) != 0;
+
+
+        // In two-controller play the active horizontal Joy-Con may not be the
+        // generic default pad, so also check every connected horizontal Joy-Con.
+        for (
+            int i = 0;
+            i < 9 && !musicSkipHeld;
+            i++
+        )
+        {
+            if (
+                !ticTacToeControllerActive[i]
+                ||
+                getControllerLayout(
+                    ticTacToePads[i]
+                ) ==
+                    CONTROLLER_LAYOUT_STANDARD
+            )
+            {
+                continue;
+            }
+
+
+            u64 controllerHeld =
+                normalizeHorizontalJoyConButtons(
+                    ticTacToePads[i],
+                    padGetButtons(
+                        ticTacToePads[i]
+                    )
+                );
+
+
+            musicSkipHeld =
+                (
+                    controllerHeld &
+                    (
+                        HidNpadButton_StickL
+                        |
+                        HidNpadButton_StickR
+                    )
+                ) != 0;
+        }
 
 
         if (
@@ -10112,10 +11258,66 @@ int main(
 
 
         HidAnalogStickState stick =
-            padGetStickPos(
-                &pad,
-                0
+        {
+            0,
+            0
+        };
+
+
+        long long strongestStickMagnitude =
+            -1;
+
+
+        for (
+            int i = 0;
+            i < 9;
+            i++
+        )
+        {
+            if (
+                !ticTacToeControllerActive[i]
+            )
+            {
+                continue;
+            }
+
+
+            HidAnalogStickState candidateStick =
+                padGetStickPos(
+                    ticTacToePads[i],
+                    getControllerLayout(
+                        ticTacToePads[i]
+                    ) ==
+                        CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL
+                        ? 1
+                        : 0
+                );
+
+
+            normalizeHorizontalJoyConStick(
+                ticTacToePads[i],
+                candidateStick
             );
+
+
+            long long magnitude =
+                (long long)candidateStick.x * candidateStick.x
+                +
+                (long long)candidateStick.y * candidateStick.y;
+
+
+            if (
+                magnitude >
+                strongestStickMagnitude
+            )
+            {
+                strongestStickMagnitude =
+                    magnitude;
+
+                stick =
+                    candidateStick;
+            }
+        }
 
 
         const int DEADZONE =
@@ -10335,12 +11537,83 @@ int main(
         // SETTINGS OVERLAY / EXIT
         // ====================================================
 
+        bool quickSettingsHintHasHorizontalJoyCon =
+            false;
+
+
+        for (
+            int i = 0;
+            i < 9;
+            i++
+        )
+        {
+            if (
+                !ticTacToeControllerActive[i]
+            )
+            {
+                continue;
+            }
+
+
+            if (
+                getControllerLayout(
+                    ticTacToePads[i]
+                ) !=
+                CONTROLLER_LAYOUT_STANDARD
+            )
+            {
+                quickSettingsHintHasHorizontalJoyCon =
+                    true;
+
+                break;
+            }
+        }
+
+
+        const char* quickSettingsHintTouchText =
+            quickSettingsHintHasHorizontalJoyCon
+                ? tr("- / +  Settings", "- / +  Ajustes")
+                : tr("-  Settings", "-  Ajustes");
+
+
+        int quickSettingsHintTouchTextWidth =
+            0;
+
+
+        int quickSettingsHintTouchTextHeight =
+            0;
+
+
+        TTF_SizeUTF8(
+            smallFont,
+            quickSettingsHintTouchText,
+            &quickSettingsHintTouchTextWidth,
+            &quickSettingsHintTouchTextHeight
+        );
+
+
+        const int quickSettingsHintHorizontalPadding =
+            18;
+
+
+        const int quickSettingsHintRightEdge =
+            1256;
+
+
         SDL_Rect quickSettingsHintTouch =
         {
-            1152,
-            18,
-            110,
-            36
+            quickSettingsHintRightEdge
+                -
+                (
+                    quickSettingsHintTouchTextWidth
+                    +
+                    2 * quickSettingsHintHorizontalPadding
+                ),
+            14,
+            quickSettingsHintTouchTextWidth
+                +
+                2 * quickSettingsHintHorizontalPadding,
+            44
         };
 
 
@@ -10813,8 +12086,11 @@ int main(
                     )
                     {
                         confirmButtonsDown |=
-                            padGetButtonsDown(
-                                ticTacToePads[source]
+                            normalizeHorizontalJoyConButtons(
+                                ticTacToePads[source],
+                                padGetButtonsDown(
+                                    ticTacToePads[source]
+                                )
                             );
                     }
                 }
@@ -12474,8 +13750,36 @@ int main(
             SCREEN_TICTACTOE_CONTROLLER_CONNECT
         )
         {
+            u64 controllerConnectButtonsDown =
+                0;
+
+
+            for (
+                int i = 0;
+                i < 9;
+                i++
+            )
+            {
+                if (
+                    !ticTacToeControllerActive[i]
+                )
+                {
+                    continue;
+                }
+
+
+                controllerConnectButtonsDown |=
+                    normalizeHorizontalJoyConButtons(
+                        ticTacToePads[i],
+                        padGetButtonsDown(
+                            ticTacToePads[i]
+                        )
+                    );
+            }
+
+
             if (
-                buttonsDown &
+                controllerConnectButtonsDown &
                 HidNpadButton_Y
             )
             {
@@ -12495,7 +13799,7 @@ int main(
                 assignedTicTacToeControllersReady()
                 &&
                 (
-                    buttonsDown &
+                    controllerConnectButtonsDown &
                     HidNpadButton_A
                 )
             )
@@ -12572,7 +13876,7 @@ int main(
                 menuStickReady = false;
             }
             else if (
-                buttonsDown &
+                controllerConnectButtonsDown &
                 HidNpadButton_B
             )
             {
@@ -14260,8 +15564,33 @@ int main(
                     gameStick =
                         padGetStickPos(
                             turnPad,
-                            0
+                            getControllerLayout(
+                                turnPad
+                            ) ==
+                                CONTROLLER_LAYOUT_JOY_RIGHT_HORIZONTAL
+                                ? 1
+                                : 0
                         );
+
+
+                    gameButtonsDown =
+                        normalizeHorizontalJoyConButtons(
+                            turnPad,
+                            gameButtonsDown
+                        );
+
+
+                    gameButtonsHeld =
+                        normalizeHorizontalJoyConButtons(
+                            turnPad,
+                            gameButtonsHeld
+                        );
+
+
+                    normalizeHorizontalJoyConStick(
+                        turnPad,
+                        gameStick
+                    );
                 }
             }
 
@@ -14724,7 +16053,11 @@ int main(
                 &&
                 (
                     gameButtonsDown &
-                    HidNpadButton_ZL
+                    (
+                        HidNpadButton_ZL
+                        |
+                        HidNpadButton_ZR
+                    )
                 )
             )
             {
@@ -15387,7 +16720,11 @@ int main(
                     {
                         if (
                             gameButtonsDown &
-                            HidNpadButton_ZR
+                            (
+                                HidNpadButton_ZL
+                                |
+                                HidNpadButton_ZR
+                            )
                         )
                         {
                             openPokemonSearchKeyboard(
@@ -16451,6 +17788,156 @@ int main(
 
 
         // ====================================================
+        // UNIVERSAL CONTROLLER HELP STATE
+        // ====================================================
+
+        bool universalShowStandardControlHelp =
+            false;
+
+
+        bool universalShowHorizontalJoyConHelp =
+            false;
+
+
+        for (
+            int i = 0;
+            i < 9;
+            i++
+        )
+        {
+            if (
+                !ticTacToeControllerActive[i]
+            )
+            {
+                continue;
+            }
+
+
+            ControllerLayout layout =
+                getControllerLayout(
+                    ticTacToePads[i]
+                );
+
+
+            if (
+                layout ==
+                CONTROLLER_LAYOUT_STANDARD
+            )
+            {
+                universalShowStandardControlHelp =
+                    true;
+            }
+            else
+            {
+                universalShowHorizontalJoyConHelp =
+                    true;
+            }
+        }
+
+
+        if (
+            universalShowHorizontalJoyConHelp
+        )
+        {
+            universalShowStandardControlHelp =
+                true;
+        }
+
+
+        if (
+            !universalShowStandardControlHelp
+            &&
+            !universalShowHorizontalJoyConHelp
+        )
+        {
+            universalShowStandardControlHelp =
+                true;
+        }
+
+
+        SDL_Color universalJoyHintActive =
+            settings.lightTheme
+                ? accent
+                : blueAccent;
+
+
+        auto drawTicTacToeSelectBackFooter =
+            [&](const SDL_Rect& footer)
+            {
+                SDL_Rect selectHint =
+                {
+                    255,
+                    footer.y - 4,
+                    300,
+                    48
+                };
+
+
+                SDL_Rect backHint =
+                {
+                    535,
+                    footer.y - 4,
+                    280,
+                    48
+                };
+
+
+                drawAdaptiveFaceControlHint(
+                    renderer,
+                    smallFont,
+                    selectHint,
+                    "A",
+                    JOY_FACE_RIGHT,
+                    tr("Select", "Seleccionar"),
+                    universalShowStandardControlHelp,
+                    universalShowHorizontalJoyConHelp,
+                    muted,
+                    muted,
+                    universalJoyHintActive
+                );
+
+
+                drawAdaptiveFaceControlHint(
+                    renderer,
+                    smallFont,
+                    backHint,
+                    "B",
+                    JOY_FACE_BOTTOM,
+                    tr("Back", "Volver"),
+                    universalShowStandardControlHelp,
+                    universalShowHorizontalJoyConHelp,
+                    muted,
+                    muted,
+                    universalJoyHintActive
+                );
+
+
+                const char* menuText =
+                    universalShowHorizontalJoyConHelp
+                        ? tr("+ / L-R  Menu", "+ / L-R  Menú")
+                        : tr("+  Menu", "+  Menú");
+
+
+                SDL_Rect menuHint =
+                {
+                    825,
+                    footer.y - 4,
+                    240,
+                    48
+                };
+
+
+                drawTextCentered(
+                    renderer,
+                    smallFont,
+                    menuText,
+                    menuHint,
+                    muted
+                );
+            };
+
+
+        // ====================================================
         // RENDER MAIN MENU
         // ====================================================
 
@@ -16459,6 +17946,79 @@ int main(
             SCREEN_MAIN_MENU
         )
         {
+            bool mainMenuShowStandardControlHelp =
+                false;
+
+
+            bool mainMenuShowHorizontalJoyConHelp =
+                false;
+
+
+            for (
+                int i = 0;
+                i < 9;
+                i++
+            )
+            {
+                if (
+                    !ticTacToeControllerActive[i]
+                )
+                {
+                    continue;
+                }
+
+
+                ControllerLayout layout =
+                    getControllerLayout(
+                        ticTacToePads[i]
+                    );
+
+
+                if (
+                    layout ==
+                    CONTROLLER_LAYOUT_STANDARD
+                )
+                {
+                    mainMenuShowStandardControlHelp =
+                        true;
+                }
+                else
+                {
+                    mainMenuShowHorizontalJoyConHelp =
+                        true;
+                }
+            }
+
+
+            // Same rule as the game screen:
+            // Joy-Con horizontal alone shows the combined
+            // standard + horizontal Joy-Con help.
+            if (
+                mainMenuShowHorizontalJoyConHelp
+            )
+            {
+                mainMenuShowStandardControlHelp =
+                    true;
+            }
+
+
+            if (
+                !mainMenuShowStandardControlHelp
+                &&
+                !mainMenuShowHorizontalJoyConHelp
+            )
+            {
+                mainMenuShowStandardControlHelp =
+                    true;
+            }
+
+
+            SDL_Color mainMenuJoyHintActive =
+                settings.lightTheme
+                    ? accent
+                    : blueAccent;
+
+
             SDL_Rect full =
             {
                 0,
@@ -16911,21 +18471,50 @@ int main(
             );
 
 
-            SDL_Rect footer =
+            SDL_Rect mainMenuSelectHint =
             {
-                0,
-                660,
-                SCREEN_WIDTH,
-                32
+                350,
+                650,
+                300,
+                48
+            };
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                mainMenuSelectHint,
+                "A",
+                JOY_FACE_RIGHT,
+                tr("Select", "Seleccionar"),
+                mainMenuShowStandardControlHelp,
+                mainMenuShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                mainMenuJoyHintActive
+            );
+
+
+            const char* mainMenuExitText =
+                mainMenuShowHorizontalJoyConHelp
+                    ? tr("+ / L-R  Exit", "+ / L-R  Salir")
+                    : tr("+  Exit", "+  Salir");
+
+
+            SDL_Rect mainMenuExitHint =
+            {
+                680,
+                650,
+                300,
+                48
             };
 
 
             drawTextCentered(
                 renderer,
                 smallFont,
-                tr("A  Select    +  Exit",
-                   "A  Seleccionar    +  Salir"),
-                footer,
+                mainMenuExitText,
+                mainMenuExitHint,
                 muted
             );
         }
@@ -17107,13 +18696,8 @@ int main(
             };
 
 
-            drawTextCentered(
-                renderer,
-                smallFont,
-                tr("A  Select    B  Back    +  Menu",
-                   "A  Seleccionar    B  Volver    +  Menú"),
-                footer,
-                muted
+            drawTicTacToeSelectBackFooter(
+                footer
             );
         }
 
@@ -17251,13 +18835,8 @@ int main(
             };
 
 
-            drawTextCentered(
-                renderer,
-                smallFont,
-                tr("A  Select    B  Back    +  Menu",
-                   "A  Seleccionar    B  Volver    +  Menú"),
-                footer,
-                muted
+            drawTicTacToeSelectBackFooter(
+                footer
             );
         }
 
@@ -17422,13 +19001,8 @@ int main(
             };
 
 
-            drawTextCentered(
-                renderer,
-                smallFont,
-                tr("A  Select    B  Back    +  Menu",
-                   "A  Seleccionar    B  Volver    +  Menú"),
-                footer,
-                muted
+            drawTicTacToeSelectBackFooter(
+                footer
             );
         }
 
@@ -17506,19 +19080,61 @@ int main(
             };
 
 
-            drawTextCentered(
+            const char* assignmentButtons =
+                universalShowHorizontalJoyConHelp
+                    ? "L + R / SL + SR"
+                    : "L + R";
+
+
+            char controllerInstruction[192];
+
+
+            if (
+                !playerOneReady
+            )
+            {
+                std::snprintf(
+                    controllerInstruction,
+                    sizeof(controllerInstruction),
+                    tr(
+                        "Player 1: press %s on the controller you want to use",
+                        "Jugador 1: pulsa %s en el mando que quieras usar"
+                    ),
+                    assignmentButtons
+                );
+            }
+            else if (
+                !playerTwoReady
+            )
+            {
+                std::snprintf(
+                    controllerInstruction,
+                    sizeof(controllerInstruction),
+                    tr(
+                        "Player 2: press %s on a different controller",
+                        "Jugador 2: pulsa %s en otro mando"
+                    ),
+                    assignmentButtons
+                );
+            }
+            else
+            {
+                std::snprintf(
+                    controllerInstruction,
+                    sizeof(controllerInstruction),
+                    "%s",
+                    tr(
+                        "Controllers ready. Press A / the right face button to continue.",
+                        "Mandos listos. Pulsa A / el botón derecho para continuar."
+                    )
+                );
+            }
+
+
+            drawTextCenteredFit(
                 renderer,
                 font,
-                !playerOneReady
-                    ? tr("Player 1: press L + R on the controller you want to use",
-                         "Jugador 1: pulsa L + R en el mando que quieras usar")
-                    : (
-                        !playerTwoReady
-                            ? tr("Player 2: press L + R on a different controller",
-                                 "Jugador 2: pulsa L + R en otro mando")
-                            : tr("Controllers ready. Press A to continue.",
-                                 "Mandos listos. Pulsa A para continuar.")
-                    ),
+                controllerInstruction,
                 infoArea,
                 muted
             );
@@ -17769,12 +19385,98 @@ int main(
             };
 
 
+            SDL_Rect continueHint =
+            {
+                35,
+                footer.y - 5,
+                255,
+                48
+            };
+
+
+            SDL_Rect changeControllersHint =
+            {
+                285,
+                footer.y - 5,
+                365,
+                48
+            };
+
+
+            SDL_Rect connectBackHint =
+            {
+                650,
+                footer.y - 5,
+                235,
+                48
+            };
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                continueHint,
+                "A",
+                JOY_FACE_RIGHT,
+                tr("Continue", "Continuar"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                changeControllersHint,
+                "Y",
+                JOY_FACE_LEFT,
+                tr("Change Controllers", "Cambiar mandos"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                connectBackHint,
+                "B",
+                JOY_FACE_BOTTOM,
+                tr("Back", "Volver"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
+            );
+
+
+            const char* connectMenuText =
+                universalShowHorizontalJoyConHelp
+                    ? tr("+ / L-R  Menu", "+ / L-R  Menú")
+                    : tr("+  Menu", "+  Menú");
+
+
+            SDL_Rect connectMenuHint =
+            {
+                930,
+                footer.y - 5,
+                285,
+                48
+            };
+
+
             drawTextCentered(
                 renderer,
                 smallFont,
-                tr("A  Continue    Y  Change Controllers    B  Back    +  Menu",
-                   "A  Continuar    Y  Cambiar mandos    B  Volver    +  Menú"),
-                footer,
+                connectMenuText,
+                connectMenuHint,
                 muted
             );
         }
@@ -18094,12 +19796,27 @@ int main(
             };
 
 
-            drawTextCentered(
+            SDL_Rect readyBackHint =
+            {
+                470,
+                footer.y - 5,
+                340,
+                48
+            };
+
+
+            drawAdaptiveFaceControlHint(
                 renderer,
                 smallFont,
-                tr("B  Back", "B  Volver"),
-                footer,
-                muted
+                readyBackHint,
+                "B",
+                JOY_FACE_BOTTOM,
+                tr("Back", "Volver"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
             );
         }
 
@@ -18113,6 +19830,79 @@ int main(
             SCREEN_UNLIMITED_SETTINGS
         )
         {
+            bool settingsShowStandardControlHelp =
+                false;
+
+
+            bool settingsShowHorizontalJoyConHelp =
+                false;
+
+
+            for (
+                int i = 0;
+                i < 9;
+                i++
+            )
+            {
+                if (
+                    !ticTacToeControllerActive[i]
+                )
+                {
+                    continue;
+                }
+
+
+                ControllerLayout layout =
+                    getControllerLayout(
+                        ticTacToePads[i]
+                    );
+
+
+                if (
+                    layout ==
+                    CONTROLLER_LAYOUT_STANDARD
+                )
+                {
+                    settingsShowStandardControlHelp =
+                        true;
+                }
+                else
+                {
+                    settingsShowHorizontalJoyConHelp =
+                        true;
+                }
+            }
+
+
+            // Same rule as the game screen:
+            // Joy-Con horizontal alone shows the combined
+            // standard + horizontal Joy-Con help.
+            if (
+                settingsShowHorizontalJoyConHelp
+            )
+            {
+                settingsShowStandardControlHelp =
+                    true;
+            }
+
+
+            if (
+                !settingsShowStandardControlHelp
+                &&
+                !settingsShowHorizontalJoyConHelp
+            )
+            {
+                settingsShowStandardControlHelp =
+                    true;
+            }
+
+
+            SDL_Color settingsJoyHintActive =
+                settings.lightTheme
+                    ? accent
+                    : blueAccent;
+
+
             SDL_Rect full =
             {
                 0,
@@ -18937,12 +20727,18 @@ int main(
             );
 
 
-            drawTextCentered(
+            drawAdaptiveFaceControlHint(
                 renderer,
                 font,
-                tr("X  Done", "X  Listo"),
                 generateButton,
-                white
+                "X",
+                JOY_FACE_TOP,
+                tr("Done", "Listo"),
+                settingsShowStandardControlHelp,
+                settingsShowHorizontalJoyConHelp,
+                white,
+                muted,
+                settingsJoyHintActive
             );
 
 
@@ -18969,15 +20765,130 @@ int main(
             }
 
 
+            SDL_Rect settingsToggleHint =
+            {
+                45,
+                650,
+                210,
+                48
+            };
+
+
+            SDL_Rect settingsAllHint =
+            {
+                260,
+                650,
+                190,
+                48
+            };
+
+
+            SDL_Rect settingsDoneHint =
+            {
+                455,
+                650,
+                190,
+                48
+            };
+
+
+            SDL_Rect settingsBackHint =
+            {
+                650,
+                650,
+                210,
+                48
+            };
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                settingsToggleHint,
+                "A",
+                JOY_FACE_RIGHT,
+                tr("Toggle", "Cambiar"),
+                settingsShowStandardControlHelp,
+                settingsShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                settingsJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                settingsAllHint,
+                "Y",
+                JOY_FACE_LEFT,
+                tr("All", "Todo"),
+                settingsShowStandardControlHelp,
+                settingsShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                settingsJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                settingsDoneHint,
+                "X",
+                JOY_FACE_TOP,
+                tr("Done", "Listo"),
+                settingsShowStandardControlHelp,
+                settingsShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                settingsJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                settingsBackHint,
+                "B",
+                JOY_FACE_BOTTOM,
+                tr("Back", "Volver"),
+                settingsShowStandardControlHelp,
+                settingsShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                settingsJoyHintActive
+            );
+
+
+            const char* settingsMenuText =
+                settingsShowHorizontalJoyConHelp
+                    ? tr("+ / L-R  Menu", "+ / L-R  Menú")
+                    : tr("+  Menu", "+  Menú");
+
+
+            int settingsMenuWidth =
+                0;
+
+
+            int settingsMenuHeight =
+                0;
+
+
+            TTF_SizeUTF8(
+                smallFont,
+                settingsMenuText,
+                &settingsMenuWidth,
+                &settingsMenuHeight
+            );
+
+
             drawText(
                 renderer,
                 smallFont,
-
-                tr("A Toggle     Y All     X Done     B Back     + Menu", "A Cambiar     Y Todo     X Listo     B Volver     + Menú"),
-
-                90,
+                settingsMenuText,
+                1235 - settingsMenuWidth,
                 660,
-
                 muted
             );
         }
@@ -18992,6 +20903,79 @@ int main(
             SCREEN_GAME
         )
         {
+            bool showStandardControlHelp =
+                false;
+
+
+            bool showHorizontalJoyConHelp =
+                false;
+
+
+            for (
+                int i = 0;
+                i < 9;
+                i++
+            )
+            {
+                if (
+                    !ticTacToeControllerActive[i]
+                )
+                {
+                    continue;
+                }
+
+
+                ControllerLayout layout =
+                    getControllerLayout(
+                        ticTacToePads[i]
+                    );
+
+
+                if (
+                    layout ==
+                    CONTROLLER_LAYOUT_STANDARD
+                )
+                {
+                    showStandardControlHelp =
+                        true;
+                }
+
+                else
+                {
+                    showHorizontalJoyConHelp =
+                        true;
+                }
+            }
+
+
+            // A horizontal Joy-Con alone uses the same visual help
+            // as the mixed Joy-Con + standard-controller case.
+            if (
+                showHorizontalJoyConHelp
+            )
+            {
+                showStandardControlHelp =
+                    true;
+            }
+
+
+            if (
+                !showStandardControlHelp
+                &&
+                !showHorizontalJoyConHelp
+            )
+            {
+                showStandardControlHelp =
+                    true;
+            }
+
+
+            SDL_Color joyHintActive =
+                settings.lightTheme
+                    ? accent
+                    : blueAccent;
+
+
             const int cellSize =
                 170;
 
@@ -20082,9 +22066,9 @@ int main(
 
             SDL_Rect newPuzzleButton =
             {
-                270,
+                570,
                 662,
-                190,
+                230,
                 42
             };
 
@@ -20092,15 +22076,15 @@ int main(
             SDL_Rect settingsButton =
                 ticTacToe.matchActive
                     ? SDL_Rect{
-                        480,
+                        820,
                         662,
-                        210,
+                        230,
                         42
                     }
                     : SDL_Rect{
-                        470,
+                        820,
                         662,
-                        175,
+                        230,
                         42
                     };
 
@@ -20129,14 +22113,20 @@ int main(
             );
 
 
-            drawTextCentered(
+            drawAdaptiveFaceControlHint(
                 renderer,
                 smallFont,
-                ticTacToe.matchActive
-                    ? tr("X  New Match", "X  Nueva partida")
-                    : tr("X  New Puzzle", "X  Nuevo puzzle"),
                 newPuzzleButton,
-                white
+                "X",
+                JOY_FACE_TOP,
+                ticTacToe.matchActive
+                    ? tr("New Match", "Nueva partida")
+                    : tr("New Puzzle", "Nuevo puzzle"),
+                showStandardControlHelp,
+                showHorizontalJoyConHelp,
+                white,
+                muted,
+                joyHintActive
             );
 
 
@@ -20164,48 +22154,93 @@ int main(
             );
 
 
-            drawTextCentered(
+            drawAdaptiveFaceControlHint(
                 renderer,
                 smallFont,
-                tr("Y  Configuration", "Y  Configuración"),
                 settingsButton,
-                white
+                "Y",
+                JOY_FACE_LEFT,
+                tr("Configuration", "Configuración"),
+                showStandardControlHelp,
+                showHorizontalJoyConHelp,
+                white,
+                muted,
+                joyHintActive
             );
 
 
             SDL_Rect selectLabel =
             {
-                32,
-                662,
-                180,
-                42
-            };
-
-
-            SDL_Rect drawLabel =
-            {
-                720,
+                24,
                 662,
                 250,
                 42
             };
 
 
+            SDL_Rect drawLabel =
+            {
+                390,
+                selectLabel.y,
+                160,
+                selectLabel.h
+            };
+
+
             SDL_Rect exitLabel =
             {
-                1095,
+                1076,
                 662,
-                150,
+                180,
                 42
             };
 
 
-            drawText(
-                renderer, smallFont,
-                tr("A Select   B Back", "A Seleccionar   B Volver"),
-                selectLabel.x,
-                selectLabel.y + (selectLabel.h - TTF_FontHeight(smallFont)) / 2,
-                muted
+            SDL_Rect selectActionLabel =
+            {
+                24,
+                selectLabel.y,
+                0,
+                selectLabel.h
+            };
+
+
+            SDL_Rect backActionLabel =
+            {
+                220,
+                selectLabel.y,
+                0,
+                selectLabel.h
+            };
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                selectActionLabel,
+                "A",
+                JOY_FACE_RIGHT,
+                tr("Select", "Seleccionar"),
+                showStandardControlHelp,
+                showHorizontalJoyConHelp,
+                muted,
+                muted,
+                joyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                backActionLabel,
+                "B",
+                JOY_FACE_BOTTOM,
+                tr("Back", "Volver"),
+                showStandardControlHelp,
+                showHorizontalJoyConHelp,
+                muted,
+                muted,
+                joyHintActive
             );
 
 
@@ -20217,21 +22252,84 @@ int main(
                 !ticTacToe.roundOver
             )
             {
-                drawTextCentered(
+                const char* drawControlText =
+
+                    tr("ZL/ZR  Request draw", "ZL/ZR  Pedir empate");
+
+
+                int drawControlWidth =
+                    0;
+
+
+                int drawControlHeight =
+                    0;
+
+
+                TTF_SizeUTF8(
+                    smallFont,
+                    drawControlText,
+                    &drawControlWidth,
+                    &drawControlHeight
+                );
+
+
+                drawText(
                     renderer,
                     smallFont,
-                    tr("ZL  Request draw", "ZL  Pedir empate"),
-                    drawLabel,
+                    drawControlText,
+                    550 - drawControlWidth,
+                    drawLabel.y +
+                        (
+                            drawLabel.h -
+                            TTF_FontHeight(
+                                smallFont
+                            )
+                        ) / 2,
                     muted
                 );
             }
 
 
-            drawTextCentered(
+            const char* menuControlText =
+                showStandardControlHelp
+                &&
+                showHorizontalJoyConHelp
+                    ? tr("+ / L-R  Menu", "+ / L-R  Menú")
+                    : (
+                        showHorizontalJoyConHelp
+                            ? tr("L-R  Menu", "L-R  Menú")
+                            : tr("+  Menu", "+  Menú")
+                    );
+
+
+            int menuControlWidth =
+                0;
+
+
+            int menuControlHeight =
+                0;
+
+
+            TTF_SizeUTF8(
+                smallFont,
+                menuControlText,
+                &menuControlWidth,
+                &menuControlHeight
+            );
+
+
+            drawText(
                 renderer,
                 smallFont,
-                tr("+ Menu", "+ Menú"),
-                exitLabel,
+                menuControlText,
+                1255 - menuControlWidth,
+                exitLabel.y +
+                    (
+                        exitLabel.h -
+                        TTF_FontHeight(
+                            smallFont
+                        )
+                    ) / 2,
                 muted
             );
 
@@ -20693,28 +22791,56 @@ int main(
                 };
 
 
-                drawTextCentered(
+                drawAdaptiveFaceControlHint(
                     renderer,
                     smallFont,
-                    tr("A  Select", "A  Seleccionar"),
                     selectorControlA,
-                    muted
+                    "A",
+                    JOY_FACE_RIGHT,
+                    tr("Select", "Seleccionar"),
+                    showStandardControlHelp,
+                    showHorizontalJoyConHelp,
+                    muted,
+                    muted,
+                    joyHintActive
                 );
 
 
+                const char* jumpControlText =
+                    showStandardControlHelp
+                    &&
+                    showHorizontalJoyConHelp
+                        ? tr("L/R / SL/SR  Jump",
+                             "L/R / SL/SR  Saltar")
+                        : (
+                            showHorizontalJoyConHelp
+                                ? tr("SL/SR  Jump",
+                                     "SL/SR  Saltar")
+                                : tr("L/R  Jump",
+                                     "L/R  Saltar")
+                        );
+
+
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    tr("L / R  Jump", "L / R  Saltar"),
+                    jumpControlText,
                     selectorControlJump,
                     muted
                 );
 
 
+                const char* searchControlText =
+
+
+
+                    tr("ZR/ZL  Search", "ZR/ZL  Buscar");
+
+
                 drawTextCentered(
                     renderer,
                     smallFont,
-                    tr("ZR  Search", "ZR  Buscar"),
+                    searchControlText,
                     selectorControlSearch,
                     muted
                 );
@@ -21308,12 +23434,50 @@ int main(
                 CONFIRM_NONE
         )
         {
+            const char* quickHintLabel =
+                universalShowHorizontalJoyConHelp
+                    ? tr("- / +  Settings", "- / +  Ajustes")
+                    : tr("-  Settings", "-  Ajustes");
+
+
+            int quickHintLabelWidth =
+                0;
+
+
+            int quickHintLabelHeight =
+                0;
+
+
+            TTF_SizeUTF8(
+                smallFont,
+                quickHintLabel,
+                &quickHintLabelWidth,
+                &quickHintLabelHeight
+            );
+
+
+            const int quickHintHorizontalPadding =
+                18;
+
+
+            const int quickHintRightEdge =
+                1256;
+
+
             SDL_Rect quickHint =
             {
-                1152,
-                18,
-                110,
-                36
+                quickHintRightEdge
+                    -
+                    (
+                        quickHintLabelWidth
+                        +
+                        2 * quickHintHorizontalPadding
+                    ),
+                14,
+                quickHintLabelWidth
+                    +
+                    2 * quickHintHorizontalPadding,
+                44
             };
 
 
@@ -21326,11 +23490,20 @@ int main(
             );
 
 
-            drawTextCentered(
+            drawText(
                 renderer,
                 smallFont,
-                tr("-  Settings", "-  Ajustes"),
-                quickHint,
+                quickHintLabel,
+                quickHint.x
+                    +
+                    quickHintHorizontalPadding,
+                quickHint.y
+                    +
+                    (
+                        quickHint.h
+                        -
+                        quickHintLabelHeight
+                    ) / 2,
                 muted
             );
         }
@@ -21342,7 +23515,7 @@ int main(
         {
             SDL_Rect quickPanel =
             {
-                870,
+                864,
                 18,
                 392,
                 364
@@ -21496,40 +23669,179 @@ int main(
             }
 
 
-            // Footer spacing: 14 px after the SFX row and 14 px below
-            // the song shortcut, with a small gap between both help lines.
-            SDL_Rect closeHint =
+            SDL_Rect quickChangeHint =
             {
-                quickPanel.x + 18,
-                quickPanel.y + 302,
-                quickPanel.w - 36,
-                20
+                quickPanel.x + 8,
+                quickPanel.y + 294,
+                170,
+                36
             };
+
+
+            SDL_Rect quickCloseHint =
+            {
+                quickPanel.x + 178,
+                quickPanel.y + 294,
+                205,
+                36
+            };
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                quickChangeHint,
+                "A",
+                JOY_FACE_RIGHT,
+                tr("Change", "Cambiar"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
+            );
+
+
+            drawAdaptiveFaceControlHint(
+                renderer,
+                smallFont,
+                quickCloseHint,
+                "B",
+                JOY_FACE_BOTTOM,
+                universalShowHorizontalJoyConHelp
+                    ? tr("Close (-/+)", "Cerrar (-/+)")
+                    : tr("Close (-)", "Cerrar (-)"),
+                universalShowStandardControlHelp,
+                universalShowHorizontalJoyConHelp,
+                muted,
+                muted,
+                universalJoyHintActive
+            );
 
 
             SDL_Rect musicSkipHint =
             {
                 quickPanel.x + 18,
-                quickPanel.y + 330,
+                quickPanel.y + 332,
                 quickPanel.w - 36,
                 20
             };
 
 
-            drawTextCenteredFit(
+            const char* musicHoldText =
+                tr("Hold", "Mantén");
+
+
+            const char* musicNextText =
+                tr("Next song", "Siguiente canción");
+
+
+            int musicHoldWidth =
+                0;
+
+
+            int musicNextWidth =
+                0;
+
+
+            int musicHintHeight =
+                0;
+
+
+            TTF_SizeUTF8(
+                smallFont,
+                musicHoldText,
+                &musicHoldWidth,
+                &musicHintHeight
+            );
+
+
+            TTF_SizeUTF8(
+                smallFont,
+                musicNextText,
+                &musicNextWidth,
+                &musicHintHeight
+            );
+
+
+            const int stickIconWidth =
+                22;
+
+
+            const int stickGap =
+                7;
+
+
+            int musicHintTotalWidth =
+                musicHoldWidth
+                +
+                stickGap
+                +
+                stickIconWidth
+                +
+                stickGap
+                +
+                musicNextWidth;
+
+
+            int musicHintX =
+                musicSkipHint.x
+                +
+                (
+                    musicSkipHint.w
+                    -
+                    musicHintTotalWidth
+                ) / 2;
+
+
+            int musicHintTextY =
+                musicSkipHint.y
+                +
+                (
+                    musicSkipHint.h
+                    -
+                    TTF_FontHeight(
+                        smallFont
+                    )
+                ) / 2;
+
+
+            drawText(
                 renderer,
                 smallFont,
-                tr("A  Change    B / -  Close", "A  Cambiar    B / -  Cerrar"),
-                closeHint,
+                musicHoldText,
+                musicHintX,
+                musicHintTextY,
                 muted
             );
 
 
-            drawTextCenteredFit(
+            musicHintX +=
+                musicHoldWidth
+                +
+                stickGap;
+
+
+            drawJoyActiveCircleHint(
+                renderer,
+                musicHintX + stickIconWidth / 2,
+                musicSkipHint.y + musicSkipHint.h / 2,
+                settings.lightTheme
+            );
+
+
+            musicHintX +=
+                stickIconWidth
+                +
+                stickGap;
+
+
+            drawText(
                 renderer,
                 smallFont,
-                tr("Hold R3  Next song", "Mantén R3  Siguiente canción"),
-                musicSkipHint,
+                musicNextText,
+                musicHintX,
+                musicHintTextY,
                 muted
             );
         }
@@ -21876,6 +24188,20 @@ int main(
             spriteCache[i] =
                 nullptr;
         }
+    }
+
+
+    if (
+        joyFaceSpriteTexture
+    )
+    {
+        SDL_DestroyTexture(
+            joyFaceSpriteTexture
+        );
+
+
+        joyFaceSpriteTexture =
+            nullptr;
     }
 
 
